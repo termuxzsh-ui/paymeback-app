@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f8fafc">
+  <meta name="description" content="A private, simple personal loan and IOU tracker.">
+  <title>PayMeBack - Personal Loan &amp; IOU Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: { extend: { colors: { ink: "#172033", brand: "#625bf6", mint: "#10b981" }, fontFamily: { sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"] } } }
+    };
+  </script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    :root { color-scheme: light; --page:#f6f7fb; --surface:#fff; --line:#e9eaf1; --text:#172033; --muted:#788197; }
+    html.dark { color-scheme: dark; --page:#0e1220; --surface:#171c2b; --line:#2a3042; --text:#edf0fa; --muted:#9aa4ba; }
+    body { background:var(--page); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    .surface { background:var(--surface); border:1px solid var(--line); }
+    .muted { color:var(--muted); }
+    .field { width:100%; border:1px solid var(--line); border-radius:.75rem; background:var(--surface); color:var(--text); padding:.7rem .85rem; outline:none; transition:border-color .15s,box-shadow .15s; }
+    .field:focus { border-color:#817cf9; box-shadow:0 0 0 3px #625bf61c; }
+    .field::placeholder { color:var(--muted); }
+    .btn { display:inline-flex; align-items:center; justify-content:center; gap:.5rem; border-radius:.75rem; padding:.67rem .95rem; font-weight:650; transition:all .15s; white-space:nowrap; }
+    .btn-primary { color:white; background:#625bf6; box-shadow:0 4px 12px #625bf62b; }
+    .btn-primary:hover { background:#5049e8; transform:translateY(-1px); }
+    .btn-soft { color:var(--text); background:var(--surface); border:1px solid var(--line); }
+    .btn-soft:hover { border-color:#c8c6ff; color:#625bf6; }
+    .icon-btn { display:inline-flex; align-items:center; justify-content:center; width:2.35rem; height:2.35rem; border-radius:.7rem; color:var(--muted); }
+    .icon-btn:hover { background:color-mix(in srgb,var(--page) 82%,#625bf6 18%); color:var(--text); }
+    .card { border-radius:1rem; box-shadow:0 2px 10px #19234a08; }
+    .metric-icon { width:2.6rem; height:2.6rem; display:grid; place-items:center; border-radius:.8rem; }
+    .modal-backdrop { position:fixed; inset:0; z-index:50; display:grid; place-items:center; padding:1rem; background:#0b1020a6; backdrop-filter:blur(5px); }
+    .modal-panel { width:min(100%,34rem); max-height:min(90vh,52rem); overflow:auto; }
+    .nav-active { color:#625bf6; background:#625bf610; }
+    .overdue { border-color:#fecaca!important; background:linear-gradient(110deg,color-mix(in srgb,var(--surface) 95%,#fee2e2),var(--surface)); }
+    .empty-dash { background-image:linear-gradient(135deg,#625bf60c 25%,transparent 25%,transparent 50%,#625bf60c 50%,#625bf60c 75%,transparent 75%); background-size:12px 12px; }
+    @media (max-width: 640px) { .modal-backdrop { padding:.5rem; align-items:end; } .modal-panel { border-radius:1.2rem 1.2rem .8rem .8rem; } }
+  </style>
+</head>
+<body class="min-h-screen">
+  <main id="app" class="min-h-screen"></main>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="fixed z-[80] bottom-4 right-4 flex flex-col gap-2" aria-live="polite"></div>
+  <input id="import-file" type="file" accept=".json,.csv,application/json,text/csv" class="hidden">
+  <script>
+  (() => {
+    "use strict";
+    const STORE_KEY = "paymeback.loans.v1";
+    const SETTINGS_KEY = "paymeback.settings.v1";
+    const $ = (selector, root = document) => root.querySelector(selector);
+    const today = () => {
+      const date = new Date();
+      return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+    };
+    const safeParse = (value, fallback) => { try { return JSON.parse(value) ?? fallback; } catch (_) { return fallback; } };
+    const html = (value) => String(value ?? "").replace(/[&<>"']/g, ch => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[ch]));
+    const num = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+    const money = value => new Intl.NumberFormat(undefined, { style:"currency", currency:"USD" }).format(num(value));
+    const dateLabel = value => {
+      if (!value) return "No due date";
+      const parsed = new Date(value + "T00:00:00");
+      return Number.isNaN(parsed.getTime()) ? "No due date" : parsed.toLocaleDateString(undefined, { month:"short", day:"numeric", year:"numeric" });
+    };
+    const uid = () => globalThis.crypto?.randomUUID?.() || `loan-${Date.now()}-${Math.random().toString(36).slice(2,9)}`;
+    let loans = loadLoans();
+    let settings = loadSettings();
+    let filter = "active";
+    let sortBy = "balance";
+    let search = "";
+    let dark = settings.theme === "dark";
+
+    function loadLoans() {
+      const data = safeParse(localStorage.getItem(STORE_KEY), []);
+      if (!Array.isArray(data)) return [];
+      return data.filter(item => item && typeof item === "object" && typeof item.borrowerName === "string")
+        .map(item => ({
+          id: String(item.id || uid()), borrowerName: item.borrowerName.slice(0,120),
+          borrowerContact: String(item.borrowerContact || "").slice(0,200),
+          startDate: /^\d{4}-\d{2}-\d{2}$/.test(item.startDate || "") ? item.startDate : today(),
+          targetDueDate: /^\d{4}-\d{2}-\d{2}$/.test(item.targetDueDate || "") ? item.targetDueDate : "",
+          initialAmount: Math.max(0, num(item.initialAmount)), reason: String(item.reason || "").slice(0,500),
+          payments: Array.isArray(item.payments) ? item.payments.filter(p => p && num(p.amount) > 0).map(p => ({
+            date: /^\d{4}-\d{2}-\d{2}$/.test(p.date || "") ? p.date : today(), amount: num(p.amount), note: String(p.note || "").slice(0,300)
+          })) : [], status: ["active","paid_in_full","archived"].includes(item.status) ? item.status : "active"
+        }));
+    }
+    function loadSettings() {
+      const saved = safeParse(localStorage.getItem(SETTINGS_KEY), {});
+      return { venmo:String(saved.venmo || ""), cashapp:String(saved.cashapp || ""), zelle:String(saved.zelle || ""), theme:saved.theme === "dark" ? "dark" : "light" };
+    }
+    function persist() {
+      localStorage.setItem(STORE_KEY, JSON.stringify(loans));
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    }
+    function paid(loan) { return loan.payments.reduce((sum,p) => sum + num(p.amount), 0); }
+    function balance(loan) { return Math.max(0, num(loan.initialAmount) - paid(loan)); }
+    function isOverdue(loan) { return loan.status === "active" && balance(loan) > 0 && loan.targetDueDate && loan.targetDueDate < today(); }
+    function setTheme() { document.documentElement.classList.toggle("dark", dark); }
+    function toast(message, kind = "success") {
+      const box = document.createElement("div");
+      box.className = `surface card flex items-center gap-2 px-4 py-3 text-sm shadow-lg ${kind === "error" ? "text-rose-500" : ""}`;
+      box.innerHTML = `<i data-lucide="${kind === "error" ? "circle-alert" : "check"}" class="h-4 w-4"></i>${html(message)}`;
+      $("#toast-root").append(box); window.lucide?.createIcons();
+      setTimeout(() => box.remove(), 3200);
+    }
+    function render() {
+      setTheme();
+      if (window.location.hash.startsWith("#share=")) { renderDebtorView(); return; }
+      const active = loans.filter(l => l.status === "active");
+      const collected = loans.reduce((sum,l) => sum + paid(l), 0);
+      const lent = loans.reduce((sum,l) => sum + num(l.initialAmount), 0);
+      let shown = loans.filter(l => {
+        if (filter === "active" && l.status !== "active") return false;
+        if (filter === "paid" && l.status !== "paid_in_full") return false;
+        if (filter === "archived" && l.status !== "archived") return false;
+        if (filter === "all" && l.status === "archived") return false;
+        const q = search.trim().toLowerCase();
+        return !q || l.borrowerName.toLowerCase().includes(q) || l.reason.toLowerCase().includes(q);
+      });
+      shown.sort((a,b) => sortBy === "name" ? a.borrowerName.localeCompare(b.borrowerName) :
+        sortBy === "due" ? (a.targetDueDate || "9999").localeCompare(b.targetDueDate || "9999") :
+        balance(b) - balance(a));
+      $("#app").innerHTML = `
+        <div class="mx-auto flex min-h-screen max-w-[1440px]">
+          <aside class="hidden w-64 shrink-0 flex-col border-r border-[var(--line)] bg-[var(--surface)] px-5 py-7 lg:flex">
+            ${brand()}
+            <p class="mb-3 mt-10 px-3 text-[10px] font-bold uppercase tracking-[.18em] muted">Workspace</p>
+            <button class="nav-active flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold"><i data-lucide="layout-dashboard" class="h-4 w-4"></i>Overview</button>
+            <button class="mt-1 flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold muted hover:bg-slate-500/5" data-action="settings"><i data-lucide="settings-2" class="h-4 w-4"></i>Settings</button>
+            <div class="mt-auto rounded-2xl bg-indigo-500/[.06] p-4">
+              <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-500"><i data-lucide="shield-check" class="h-4 w-4"></i></div>
+              <p class="text-sm font-bold">Your data stays yours</p><p class="mt-1 text-xs leading-5 muted">Loans are stored securely in this browser. Nothing is sent to a server.</p>
+            </div>
+          </aside>
+          <section class="min-w-0 flex-1 px-4 pb-12 pt-5 sm:px-7 lg:px-10 lg:pt-8">
+            <header class="mb-8 flex items-center justify-between gap-3">
+              <div class="flex items-center gap-3 lg:hidden">${brand(true)}</div>
+              <div class="hidden lg:block"><p class="text-sm muted">Your personal finance workspace</p></div>
+              <div class="ml-auto flex items-center gap-2">
+                <button class="btn btn-soft !px-3" data-action="theme" aria-label="Toggle theme"><i data-lucide="${dark ? "sun" : "moon"}" class="h-4 w-4"></i><span class="hidden sm:inline">${dark ? "Light" : "Dark"} mode</span></button>
+                <button class="btn btn-soft !px-3" data-action="settings" aria-label="Settings"><i data-lucide="settings-2" class="h-4 w-4"></i></button>
+                <button class="btn btn-primary" data-action="new-loan"><i data-lucide="plus" class="h-4 w-4"></i><span class="hidden sm:inline">New loan</span><span class="sm:hidden">Add</span></button>
+              </div>
+            </header>
+            <div class="mb-7">
+              <p class="mb-2 inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-emerald-600"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Private &amp; local</p>
+              <h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl">Good ${greeting()}, keep it all in view.</h1>
+              <p class="mt-2 text-sm muted">A clear picture of the money you’ve lent and the people who owe you.</p>
+            </div>
+            <div class="mb-7 grid grid-cols-2 gap-3 xl:grid-cols-4">
+              ${metric("hand-coins","Total amount lent",money(lent),"#625bf6","bg-indigo-500/10")}
+              ${metric("arrow-down-left","Total collected",money(collected),"#10b981","bg-emerald-500/10")}
+              ${metric("wallet","Outstanding balance",money(active.reduce((s,l)=>s+balance(l),0)),"#f59e0b","bg-amber-500/10")}
+              ${metric("users-round","Active debtors",active.length,"#0ea5e9","bg-sky-500/10")}
+            </div>
+            <section class="surface card mb-6 flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+              <div><h2 class="font-bold">Your loans</h2><p class="mt-1 text-xs muted">${shown.length} ${shown.length === 1 ? "record" : "records"} in this view</p></div>
+              <div class="flex flex-col gap-2 sm:flex-row">
+                <label class="relative min-w-0 sm:w-56"><i data-lucide="search" class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 muted"></i><input class="field !py-2 !pl-9 text-sm" id="search" placeholder="Search people or notes…" value="${html(search)}"></label>
+                <select class="field !w-auto !py-2 text-sm" id="sort"><option value="balance" ${sortBy==="balance"?"selected":""}>Sort: balance</option><option value="due" ${sortBy==="due"?"selected":""}>Sort: due date</option><option value="name" ${sortBy==="name"?"selected":""}>Sort: name</option></select>
+              </div>
+            </section>
+            <div class="mb-4 flex gap-1 overflow-x-auto border-b border-[var(--line)]" role="tablist">
+              ${tab("active","Active")}${tab("paid","Paid off")}${tab("all","All loans")}${tab("archived","Archived")}
+            </div>
+            <section id="loan-list" class="grid gap-3 xl:grid-cols-2">${shown.length ? shown.map(loanCard).join("") : emptyState()}</section>
+            <footer class="mt-10 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] pt-5 text-xs muted">
+              <span><i data-lucide="lock-keyhole" class="mr-1 inline h-3.5 w-3.5 align-[-2px]"></i>Stored only on this device</span>
+              <div class="flex gap-2"><button class="hover:text-indigo-500" data-action="export-json">Export JSON</button><span>·</span><button class="hover:text-indigo-500" data-action="export-csv">Export CSV</button><span>·</span><button class="hover:text-indigo-500" data-action="import">Import backup</button></div>
+            </footer>
+          </section>
+        </div>`;
+      window.lucide?.createIcons();
+    }
+    function greeting() { const h = new Date().getHours(); return h < 12 ? "morning" : h < 17 ? "afternoon" : "evening"; }
+    function brand(compact = false) { return `<div class="flex items-center gap-2.5"><div class="grid h-10 w-10 place-items-center rounded-xl bg-indigo-600 text-white shadow-lg shadow-indigo-600/20"><i data-lucide="hand-coins" class="h-5 w-5"></i></div><div><p class="text-base font-extrabold leading-5 tracking-tight">PayMeBack</p>${compact ? "" : '<p class="text-[10px] font-medium tracking-wide muted">PERSONAL LOAN TRACKER</p>'}</div></div>`; }
+    function metric(icon,title,value,color,bg) { return `<article class="surface card flex min-w-0 items-center gap-3 p-3.5 sm:p-5"><div class="metric-icon shrink-0 ${bg}" style="color:${color}"><i data-lucide="${icon}" class="h-5 w-5"></i></div><div class="min-w-0"><p class="truncate text-[11px] font-medium muted sm:text-xs">${title}</p><p class="mt-1 truncate text-lg font-extrabold tracking-tight sm:text-2xl">${value}</p></div></article>`; }
+    function tab(id,label) { return `<button role="tab" aria-selected="${filter===id}" data-filter="${id}" class="whitespace-nowrap border-b-2 px-3 pb-3 text-sm font-semibold ${filter===id?"border-indigo-500 text-indigo-500":"border-transparent muted hover:text-[var(--text)]"}">${label}</button>`; }
+    function loanCard(loan) {
+      const bal = balance(loan), pct = loan.initialAmount ? Math.min(100,Math.round(paid(loan)/loan.initialAmount*100)) : 100;
+      const overdue = isOverdue(loan);
+      const status = loan.status === "paid_in_full" ? "Paid off" : loan.status === "archived" ? "Archived" : overdue ? "Overdue" : "Active";
+      const badge = loan.status === "paid_in_full" ? "bg-emerald-500/10 text-emerald-600" : loan.status === "archived" ? "bg-slate-500/10 muted" : overdue ? "bg-rose-500/10 text-rose-600" : "bg-indigo-500/10 text-indigo-600";
+      return `<article class="surface card ${overdue?"overdue":""} p-4 sm:p-5">
+        <div class="flex items-start justify-between gap-3"><div class="flex min-w-0 items-center gap-3"><div class="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-500/15 to-emerald-500/15 text-sm font-bold text-indigo-600">${html(initials(loan.borrowerName))}</div><div class="min-w-0"><h3 class="truncate font-bold">${html(loan.borrowerName)}</h3><p class="mt-0.5 truncate text-xs muted">${html(loan.reason || "Personal loan")}</p></div></div>
+          <div class="flex shrink-0 items-center gap-1"><span class="rounded-full px-2.5 py-1 text-[10px] font-bold ${badge}">${status}</span><button class="icon-btn !h-8 !w-8" data-action="loan-menu" data-id="${html(loan.id)}" aria-label="Loan actions"><i data-lucide="ellipsis" class="h-4 w-4"></i></button></div>
+        </div>
+        <div class="mt-5 grid grid-cols-2 gap-3"><div><p class="text-[11px] muted">Remaining</p><p class="mt-1 text-xl font-extrabold tracking-tight">${money(bal)}</p></div><div class="text-right"><p class="text-[11px] muted">Original loan</p><p class="mt-1 font-bold">${money(loan.initialAmount)}</p></div></div>
+        <div class="mt-4"><div class="mb-1.5 flex justify-between text-[10px] font-medium muted"><span>${pct}% repaid</span><span>${money(paid(loan))} collected</span></div><div class="h-1.5 overflow-hidden rounded-full bg-slate-500/10"><div class="h-full rounded-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all" style="width:${pct}%"></div></div></div>
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)] pt-3"><p class="text-[11px] ${overdue?"font-semibold text-rose-600":"muted"}"><i data-lucide="${overdue?"triangle-alert":"calendar-days"}" class="mr-1 inline h-3.5 w-3.5 align-[-2px]"></i>${overdue?"Due "+dateLabel(loan.targetDueDate):loan.targetDueDate?"Due "+dateLabel(loan.targetDueDate):"Started "+dateLabel(loan.startDate)}</p>
+          <div class="flex gap-1"><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="share" data-id="${html(loan.id)}" title="Create debtor statement link"><i data-lucide="link-2" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Share</span></button>
+          ${loan.status==="active"?`<button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="payment" data-id="${html(loan.id)}"><i data-lucide="plus" class="h-3.5 w-3.5"></i>Payment</button>`:""}
+          <button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="reminder" data-id="${html(loan.id)}"><i data-lucide="message-circle" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Remind</span></button></div>
+        </div></article>`;
+    }
+    function initials(name) { return String(name || "?").trim().split(/\s+/).slice(0,2).map(w => w[0] || "").join("").toUpperCase(); }
+    function emptyState() { return `<div class="surface card empty-dash col-span-full flex flex-col items-center px-5 py-12 text-center"><div class="mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-indigo-500/10 text-indigo-500"><i data-lucide="${search?"search":"hand-coins"}" class="h-6 w-6"></i></div><h3 class="font-bold">${search?"No matches found":filter==="paid"?"No paid-off loans yet":filter==="archived"?"Nothing archived":"Start tracking your first loan"}</h3><p class="mt-1 max-w-sm text-sm muted">${search?"Try another name or reason.":"Add a loan to keep balances, payments, and reminders organized in one place."}</p>${!search&&filter==="active"?'<button class="btn btn-primary mt-5" data-action="new-loan"><i data-lucide="plus" class="h-4 w-4"></i>Add a loan</button>':""}</div>`; }
+    function openModal(title, content, options = {}) {
+      $("#modal-root").innerHTML = `<div class="modal-backdrop" data-action="backdrop"><section class="modal-panel surface card p-5 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="mb-5 flex items-center justify-between gap-3"><h2 id="modal-title" class="text-lg font-extrabold">${html(title)}</h2><button class="icon-btn" data-action="close-modal" aria-label="Close"><i data-lucide="x" class="h-5 w-5"></i></button></div>${content}</section></div>`;
+      window.lucide?.createIcons();
+      const first = $("#modal-root .field"); if (first && !options.noFocus) first.focus();
+    }
+    function closeModal() { $("#modal-root").innerHTML = ""; }
+    function loanForm(loan = null) {
+      const editing = !!loan;
+      openModal(editing?"Edit loan":"Add a loan", `<form id="loan-form" class="space-y-4">
+        <input type="hidden" name="id" value="${html(loan?.id || "")}">
+        <div><label class="mb-1.5 block text-xs font-semibold" for="borrowerName">Borrower name *</label><input required maxlength="120" class="field" name="borrowerName" id="borrowerName" placeholder="e.g. Alex Morgan" value="${html(loan?.borrowerName || "")}"></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="borrowerContact">Contact <span class="font-normal muted">(optional)</span></label><input maxlength="200" class="field" name="borrowerContact" id="borrowerContact" placeholder="Phone or email" value="${html(loan?.borrowerContact || "")}"></div>
+        <div class="grid grid-cols-2 gap-3"><div><label class="mb-1.5 block text-xs font-semibold" for="initialAmount">Loan amount *</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">$</span><input required min="0.01" step="0.01" type="number" class="field !pl-7" name="initialAmount" id="initialAmount" placeholder="0.00" value="${loan?html(loan.initialAmount):""}"></div></div><div><label class="mb-1.5 block text-xs font-semibold" for="startDate">Date lent *</label><input required type="date" class="field" name="startDate" id="startDate" value="${html(loan?.startDate || today())}"></div></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="targetDueDate">Target due date <span class="font-normal muted">(optional)</span></label><input type="date" class="field" name="targetDueDate" id="targetDueDate" value="${html(loan?.targetDueDate || "")}"></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="reason">What was it for? <span class="font-normal muted">(optional)</span></label><input maxlength="500" class="field" name="reason" id="reason" placeholder="e.g. Car repair" value="${html(loan?.reason || "")}"></div>
+        ${editing && loan.payments.length?`<p class="rounded-xl bg-amber-500/10 p-3 text-xs leading-5 text-amber-700 dark:text-amber-300"><i data-lucide="info" class="mr-1 inline h-3.5 w-3.5 align-[-2px]"></i>Existing payments are preserved. New loan amount cannot be less than payments already recorded (${money(paid(loan))}).</p>`:""}
+        <div class="flex justify-end gap-2 pt-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">${editing?"Save changes":"Create loan"}</button></div></form>`);
+    }
+    function paymentForm(loan) {
+      openModal("Record a payment", `<div class="mb-4 rounded-xl bg-emerald-500/[.07] p-3"><p class="text-sm font-bold">${html(loan.borrowerName)}</p><p class="mt-1 text-xs muted">Remaining balance: <strong class="text-[var(--text)]">${money(balance(loan))}</strong></p></div><form id="payment-form" data-id="${html(loan.id)}" class="space-y-4">
+        <div><label class="mb-1.5 block text-xs font-semibold" for="paymentAmount">Amount received *</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">$</span><input required type="number" min="0.01" step="0.01" max="${balance(loan)}" name="amount" id="paymentAmount" class="field !pl-7" placeholder="0.00"></div><p class="mt-1 text-[11px] muted">Cannot exceed the remaining balance.</p></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="paymentDate">Payment date</label><input type="date" name="date" id="paymentDate" class="field" value="${today()}"></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="paymentNote">Note <span class="font-normal muted">(optional)</span></label><input maxlength="300" name="note" id="paymentNote" class="field" placeholder="e.g. Venmo"></div>
+        <div class="flex justify-end gap-2 pt-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit"><i data-lucide="check" class="h-4 w-4"></i>Save payment</button></div></form>`);
+    }
+    function settingsForm() {
+      openModal("Payment & app settings", `<p class="mb-4 text-sm leading-6 muted">Add your payment details so borrowers can pay you directly from reminders and their shared statement.</p><form id="settings-form" class="space-y-4">
+        <div><label class="mb-1.5 block text-xs font-semibold" for="venmo">Venmo username</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">@</span><input class="field !pl-8" id="venmo" name="venmo" placeholder="username" value="${html(settings.venmo)}"></div></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="cashapp">Cash App $Cashtag</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">$</span><input class="field !pl-8" id="cashapp" name="cashapp" placeholder="cashtag" value="${html(settings.cashapp)}"></div></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="zelle">Zelle details</label><input class="field" id="zelle" name="zelle" placeholder="Phone number or email" value="${html(settings.zelle)}"></div>
+        <div class="flex items-center justify-between rounded-xl border border-[var(--line)] p-3"><div><p class="text-sm font-semibold">Appearance</p><p class="text-xs muted">Use a darker interface</p></div><button type="button" data-action="settings-theme" class="btn btn-soft !py-2 text-xs"><i data-lucide="${dark?"sun":"moon"}" class="h-4 w-4"></i>${dark?"Dark":"Light"} mode</button></div>
+        <div class="flex justify-end gap-2 pt-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Save settings</button></div></form>`);
+    }
+    function paymentLinks() {
+      const venmo = settings.venmo.trim().replace(/^@/,"");
+      const cash = settings.cashapp.trim().replace(/^\$/,"");
+      return [
+        venmo ? `Venmo: https://venmo.com/${encodeURIComponent(venmo)}` : "",
+        cash ? `Cash App: https://cash.app/$${encodeURIComponent(cash)}` : "",
+        settings.zelle.trim() ? `Zelle: ${settings.zelle.trim()}` : ""
+      ].filter(Boolean).join("\n");
+    }
+    function reminderForm(loan) {
+      const due = balance(loan);
+      openModal("Create a payment reminder", `<p class="mb-4 text-sm leading-6 muted">A thoughtful nudge, ready to copy and send. You can edit it before sharing.</p><form id="reminder-form" data-id="${html(loan.id)}" class="space-y-4">
+        <div class="rounded-xl bg-indigo-500/[.07] p-3"><p class="text-sm font-bold">${html(loan.borrowerName)} <span class="font-normal muted">· ${money(due)} remaining</span></p></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="tone">Message tone</label><select class="field" id="tone" name="tone"><option>Friendly</option><option>Formal</option><option>Humorous</option><option>Direct</option></select></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="reminder-copy">Message</label><textarea id="reminder-copy" name="copy" rows="7" class="field resize-y text-sm leading-6"></textarea></div>
+        <div class="flex flex-wrap justify-between gap-2"><button type="button" class="btn btn-soft" data-action="regenerate-reminder" data-id="${html(loan.id)}"><i data-lucide="refresh-cw" class="h-4 w-4"></i>Regenerate</button><button type="button" class="btn btn-primary" data-action="copy-reminder"><i data-lucide="copy" class="h-4 w-4"></i>Copy message</button></div>
+      </form>`);
+      $("#reminder-form").dataset.name = loan.borrowerName;
+      $("#reminder-form").dataset.balance = String(due);
+      $("#reminder-form").dataset.reason = loan.reason || "";
+      updateReminder();
+    }
+    function updateReminder() {
+      const form = $("#reminder-form"); if (!form) return;
+      const name = form.dataset.name || "there", due = money(form.dataset.balance), reason = form.dataset.reason;
+      const tone = $("#tone").value;
+      const openers = {
+        Friendly:`Hey ${name}! Hope you’re doing well. Just a friendly reminder about the ${reason ? `${reason} ` : ""}loan. There’s ${due} left to repay.`,
+        Formal:`Hello ${name}, I’m writing with a courteous reminder that ${due} remains outstanding on your personal loan${reason ? ` for ${reason}` : ""}.`,
+        Humorous:`Hey ${name}! My wallet sent a tiny reminder that ${due} from our loan is still out exploring. Think you can help it find its way home?`,
+        Direct:`Hi ${name}, your remaining loan balance is ${due}. Please let me know when you expect to repay it.`
+      };
+      const links = paymentLinks();
+      $("#reminder-copy").value = `${openers[tone] || openers.Friendly}${links ? `\n\nEasy ways to pay:\n${links}` : ""}\n\nThanks!`;
+    }
+    function shareLoan(loan) {
+      const data = {
+        v:1, borrowerName:loan.borrowerName, initialAmount:num(loan.initialAmount), reason:loan.reason || "",
+        startDate:loan.startDate, targetDueDate:loan.targetDueDate || "", status:loan.status,
+        payments:loan.payments.map(p=>({date:p.date,amount:num(p.amount),note:p.note || ""})),
+        paymentOptions:{ venmo:settings.venmo, cashapp:settings.cashapp, zelle:settings.zelle }
+      };
+      const encoded = toBase64(JSON.stringify(data));
+      const url = `${location.href.split("#")[0]}#share=${encodeURIComponent(encoded)}`;
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(url).then(()=>toast("Private statement link copied")).catch(()=>prompt("Copy this statement link:",url));
+      else prompt("Copy this statement link:",url);
+    }
+    function toBase64(text) { const bytes = new TextEncoder().encode(text); let binary=""; bytes.forEach(b=>binary+=String.fromCharCode(b)); return btoa(binary).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
+    function fromBase64(value) { const binary = atob(value.replace(/-/g,"+").replace(/_/g,"/")); const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0)); return new TextDecoder().decode(bytes); }
+    function renderDebtorView() {
+      closeModal();
+      let data;
+      try {
+        const raw = location.hash.slice("#share=".length).split("&")[0];
+        data = JSON.parse(fromBase64(decodeURIComponent(raw)));
+        if (!data || typeof data.borrowerName !== "string" || !Array.isArray(data.payments) || !Number.isFinite(Number(data.initialAmount))) throw new Error("Invalid statement");
+      } catch (_) {
+        $("#app").innerHTML = `<div class="mx-auto flex min-h-screen max-w-xl items-center px-5"><section class="surface card w-full p-7 text-center"><div class="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-rose-500/10 text-rose-500"><i data-lucide="link-2-off" class="h-6 w-6"></i></div><h1 class="text-xl font-extrabold">This statement link isn’t valid</h1><p class="mt-2 text-sm muted">The link may be incomplete or out of date. Ask the sender for a new one.</p><button class="btn btn-primary mt-5" data-action="exit-share">Open PayMeBack</button></section></div>`;
+        window.lucide?.createIcons(); return;
+      }
+      const payments = data.payments.filter(p=>p && num(p.amount)>0);
+      const totalPaid = payments.reduce((s,p)=>s+num(p.amount),0);
+      const remaining = Math.max(0,num(data.initialAmount)-totalPaid);
+      const options = data.paymentOptions || {};
+      const venmo = String(options.venmo || "").trim().replace(/^@/,"");
+      const cash = String(options.cashapp || "").trim().replace(/^\$/,"");
+      const zelle = String(options.zelle || "").trim();
+      const payButtons = `${venmo?`<a class="btn btn-soft flex-1" target="_blank" rel="noopener noreferrer" href="https://venmo.com/${encodeURIComponent(venmo)}"><i data-lucide="send" class="h-4 w-4 text-sky-500"></i>Pay via Venmo</a>`:""}${cash?`<a class="btn btn-soft flex-1" target="_blank" rel="noopener noreferrer" href="https://cash.app/$${encodeURIComponent(cash)}"><i data-lucide="circle-dollar-sign" class="h-4 w-4 text-emerald-500"></i>Pay via Cash App</a>`:""}`;
+      $("#app").innerHTML = `<div class="mx-auto min-h-screen max-w-2xl px-4 py-8 sm:px-8 sm:py-12">
+        <header class="mb-8 flex items-center justify-between">${brand()}<button class="btn btn-soft !px-3 text-xs" data-action="exit-share"><i data-lucide="x" class="h-4 w-4"></i><span class="hidden sm:inline">Close statement</span></button></header>
+        <section class="surface card overflow-hidden">
+          <div class="bg-gradient-to-br from-indigo-600 to-violet-600 px-6 py-8 text-white sm:px-9 sm:py-10"><p class="mb-3 text-xs font-bold uppercase tracking-[.15em] text-indigo-100">Personal loan statement</p><h1 class="text-2xl font-extrabold sm:text-3xl">Hi, ${html(data.borrowerName)}</h1><p class="mt-2 max-w-md text-sm leading-6 text-indigo-100">Here’s a friendly summary of your loan${data.reason?` for ${html(data.reason)}`:""}. Please reach out if you have any questions.</p></div>
+          <div class="grid grid-cols-2 gap-4 border-b border-[var(--line)] px-6 py-6 sm:px-9"><div><p class="text-xs muted">Original amount</p><p class="mt-1 text-xl font-bold">${money(data.initialAmount)}</p></div><div><p class="text-xs muted">Remaining balance</p><p class="mt-1 text-xl font-extrabold text-indigo-500">${money(remaining)}</p></div><div><p class="text-xs muted">Paid so far</p><p class="mt-1 font-bold text-emerald-600">${money(totalPaid)}</p></div><div><p class="text-xs muted">Loan date</p><p class="mt-1 font-semibold">${dateLabel(data.startDate)}</p></div></div>
+          <div class="px-6 py-6 sm:px-9"><div class="mb-4 flex items-center justify-between"><h2 class="font-bold">Payment history</h2><span class="rounded-full bg-slate-500/10 px-2.5 py-1 text-[10px] font-bold muted">${payments.length} ${payments.length===1?"payment":"payments"}</span></div>
+            ${payments.length?`<div class="divide-y divide-[var(--line)]">${payments.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>`<div class="flex items-center justify-between gap-3 py-3"><div class="flex items-center gap-3"><div class="grid h-8 w-8 place-items-center rounded-full bg-emerald-500/10 text-emerald-600"><i data-lucide="check" class="h-4 w-4"></i></div><div><p class="text-sm font-semibold">${html(p.note || "Payment received")}</p><p class="mt-0.5 text-xs muted">${dateLabel(p.date)}</p></div></div><p class="font-bold text-emerald-600">−${money(p.amount)}</p></div>`).join("")}</div>`:`<p class="rounded-xl bg-slate-500/[.05] px-4 py-5 text-center text-sm muted">No payments have been recorded yet.</p>`}
+          </div>
+          <div class="border-t border-[var(--line)] bg-slate-500/[.025] px-6 py-6 sm:px-9"><h2 class="mb-3 font-bold">Payment options</h2>${payButtons?`<div class="flex flex-col gap-2 sm:flex-row">${payButtons}</div>`:""}
+            ${zelle?`<div class="mt-3 rounded-xl border border-[var(--line)] p-3"><p class="text-[11px] font-semibold muted">Zelle</p><p class="mt-1 break-all text-sm font-semibold">${html(zelle)}</p></div>`:""}
+            ${!payButtons&&!zelle?'<p class="text-sm muted">Please contact the lender for payment details.</p>':""}
+          </div>
+          <p class="px-6 py-4 text-center text-[11px] muted sm:px-9">This is a read-only statement shared with you by the lender.</p>
+        </section><p class="mt-5 text-center text-xs muted">Powered by PayMeBack · Private by design</p>
+      </div>`;
+      window.lucide?.createIcons();
+    }
+    function exportFile(name, content, type) {
+      const blob = new Blob([content],{type}); const url=URL.createObjectURL(blob);
+      const a=document.createElement("a"); a.href=url; a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }
+    function csvCell(value) { const text=String(value ?? ""); return `"${text.replace(/"/g,'""')}"`; }
+    function exportCSV() {
+      const columns=["id","borrowerName","borrowerContact","startDate","targetDueDate","initialAmount","reason","status","payments"];
+      const rows=[columns.map(csvCell).join(","),...loans.map(l=>[l.id,l.borrowerName,l.borrowerContact,l.startDate,l.targetDueDate,l.initialAmount,l.reason,l.status,JSON.stringify(l.payments)].map(csvCell).join(","))];
+      exportFile("paymeback-loans.csv",rows.join("\r\n"),"text/csv;charset=utf-8");
+    }
+    function csvRows(text) {
+      const rows=[]; let row=[], field="", quoted=false;
+      for(let i=0;i<text.length;i++) {
+        const c=text[i];
+        if(quoted && c==='"' && text[i+1]==='"'){field+='"';i++;}
+        else if(c==='"') quoted=!quoted;
+        else if(c==="," && !quoted){row.push(field);field="";}
+        else if((c==="\n"||c==="\r")&&!quoted){if(c==="\r"&&text[i+1]==="\n")i++;row.push(field);if(row.some(v=>v!==""))rows.push(row);row=[];field="";}
+        else field+=c;
+      }
+      row.push(field);if(row.some(v=>v!==""))rows.push(row);return rows;
+    }
+    async function importFile(file) {
+      if(!file) return;
+      try {
+        const text=await file.text();
+        let incoming, importedSettings=null;
+        if(file.name.toLowerCase().endsWith(".csv")) {
+          const rows=csvRows(text);
+          if(rows.length<2) throw new Error("The CSV file has no loan records.");
+          const headers=rows[0].map(v=>v.trim());
+          incoming=rows.slice(1).map(row=>{
+            const obj={};headers.forEach((h,i)=>obj[h]=row[i] ?? "");
+            obj.payments=safeParse(obj.payments,[]);
+            return obj;
+          });
+        } else {
+          const parsed=JSON.parse(text);
+          if(Array.isArray(parsed)) incoming=parsed;
+          else if(parsed && Array.isArray(parsed.loans)) { incoming=parsed.loans; if(parsed.settings) importedSettings=sanitizeSettings(parsed.settings); }
+          else throw new Error("Choose a PayMeBack JSON or CSV backup.");
+        }
+        if(!Array.isArray(incoming)||!incoming.length) throw new Error("No loan records were found in that backup.");
+        const clean=incoming.filter(l=>l && typeof l.borrowerName==="string" && num(l.initialAmount)>0).map(l=>({
+          id:String(l.id||uid()), borrowerName:String(l.borrowerName).slice(0,120), borrowerContact:String(l.borrowerContact||"").slice(0,200),
+          startDate:/^\d{4}-\d{2}-\d{2}$/.test(l.startDate||"")?l.startDate:today(),
+          targetDueDate:/^\d{4}-\d{2}-\d{2}$/.test(l.targetDueDate||"")?l.targetDueDate:"",
+          initialAmount:num(l.initialAmount),reason:String(l.reason||"").slice(0,500),
+          payments:(Array.isArray(l.payments)?l.payments:[]).filter(p=>p&&num(p.amount)>0).map(p=>({date:/^\d{4}-\d{2}-\d{2}$/.test(p.date||"")?p.date:today(),amount:num(p.amount),note:String(p.note||"").slice(0,300)})),
+          status:["active","paid_in_full","archived"].includes(l.status)?l.status:"active"
+        }));
+        if(!clean.length) throw new Error("No valid loan records were found.");
+        if(!confirm(`Import ${clean.length} loan${clean.length===1?"":"s"}? This replaces your current loan list.`)) return;
+        loans=clean;
+        if(importedSettings) { settings={...settings,...importedSettings}; dark=settings.theme==="dark"; }
+        persist(); render(); toast(`${clean.length} loan records imported`);
+      } catch(error) { toast(error?.message||"Could not import this backup.", "error"); }
+      finally { $("#import-file").value=""; }
+    }
+    function sanitizeSettings(raw) { return {venmo:String(raw.venmo||""),cashapp:String(raw.cashapp||""),zelle:String(raw.zelle||""),theme:raw.theme==="dark"?"dark":"light"}; }
+    function action(event) {
+      const trigger=event.target.closest("[data-action],[data-filter]");
+      if(!trigger) return;
+      const type=trigger.dataset.action, id=trigger.dataset.id;
+      if(trigger.dataset.filter) { filter=trigger.dataset.filter;render();return; }
+      if(type==="backdrop" && event.target===trigger) {closeModal();return;}
+      if(type==="close-modal") {closeModal();return;}
+      if(type==="theme") {dark=!dark;settings.theme=dark?"dark":"light";persist();render();return;}
+      if(type==="settings") {settingsForm();return;}
+      if(type==="settings-theme") {dark=!dark;settings.theme=dark?"dark":"light";persist();settingsForm();return;}
+      if(type==="new-loan") {loanForm();return;}
+      if(type==="payment") {const loan=loans.find(l=>l.id===id);if(loan)paymentForm(loan);return;}
+      if(type==="reminder") {const loan=loans.find(l=>l.id===id);if(loan)reminderForm(loan);return;}
+      if(type==="share") {const loan=loans.find(l=>l.id===id);if(loan)shareLoan(loan);return;}
+      if(type==="loan-menu") {loanActions(id);return;}
+      if(type==="export-json") {exportFile("paymeback-backup.json",JSON.stringify({version:1,exportedAt:new Date().toISOString(),loans,settings},null,2),"application/json");toast("JSON backup downloaded");return;}
+      if(type==="export-csv") {exportCSV();toast("CSV backup downloaded");return;}
+      if(type==="import") {$("#import-file").click();return;}
+      if(type==="regenerate-reminder") {updateReminder();return;}
+      if(type==="copy-reminder") {
+        const text=$("#reminder-copy")?.value||"";
+        if(navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(()=>toast("Reminder copied to clipboard")).catch(()=>fallbackCopy(text));
+        else fallbackCopy(text);
+        return;
+      }
+      if(type==="exit-share") {history.replaceState(null,"",location.pathname+location.search);render();return;}
+    }
+    function fallbackCopy(text) { const field=$("#reminder-copy");if(field){field.select();document.execCommand("copy");toast("Reminder copied to clipboard");}else prompt("Copy this text:",text); }
+    function loanActions(id) {
+      const loan=loans.find(l=>l.id===id);if(!loan)return;
+      const choices=`<button class="btn btn-soft w-full justify-start" data-action="edit" data-id="${html(id)}"><i data-lucide="pencil" class="h-4 w-4"></i>Edit loan</button>${loan.status==="archived"?`<button class="btn btn-soft w-full justify-start" data-action="restore" data-id="${html(id)}"><i data-lucide="archive-restore" class="h-4 w-4"></i>Restore to active</button>`:`<button class="btn btn-soft w-full justify-start text-amber-600" data-action="archive" data-id="${html(id)}"><i data-lucide="archive" class="h-4 w-4"></i>Archive loan</button>`}`;
+      openModal("Loan actions",`<div class="space-y-2">${choices}<button class="btn btn-soft w-full justify-start text-rose-600" data-action="delete-loan" data-id="${html(id)}"><i data-lucide="trash-2" class="h-4 w-4"></i>Delete loan</button></div>`);
+    }
+    document.addEventListener("click", action);
+    document.addEventListener("input", event=>{if(event.target.id==="search"){search=event.target.value;const start=event.target.selectionStart;render();const input=$("#search");input.focus();input.setSelectionRange(start,start);}});
+    document.addEventListener("change", event=>{
+      if(event.target.id==="sort"){sortBy=event.target.value;render();}
+      if(event.target.id==="tone")updateReminder();
+      if(event.target.id==="import-file")importFile(event.target.files?.[0]);
+    });
+    document.addEventListener("submit", event=>{
+      const form=event.target;if(!form.matches("form"))return;
+      event.preventDefault();const fd=new FormData(form);const formId=form.getAttribute("id");
+      if(formId==="loan-form") {
+        const id=String(fd.get("id")||"");
+        const amount=num(fd.get("initialAmount"));
+        if(!String(fd.get("borrowerName")||"").trim()||amount<=0){toast("Enter a name and a loan amount greater than zero.","error");return;}
+        const existing=loans.find(l=>l.id===id);
+        if(existing&&amount<paid(existing)){toast("Loan amount can’t be less than payments already recorded.","error");return;}
+        const loan={id:id||uid(),borrowerName:String(fd.get("borrowerName")).trim(),borrowerContact:String(fd.get("borrowerContact")||"").trim(),startDate:String(fd.get("startDate")||today()),targetDueDate:String(fd.get("targetDueDate")||""),initialAmount:amount,reason:String(fd.get("reason")||"").trim(),payments:existing?existing.payments:[],status:existing?.status==="archived"?"archived":amount<=paid(existing||{payments:[]})?"paid_in_full":"active"};
+        if(existing)loans=loans.map(l=>l.id===id?loan:l);else loans.unshift(loan);
+        persist();closeModal();render();toast(existing?"Loan updated":"Loan added");return;
+      }
+      if(formId==="payment-form") {
+        const loan=loans.find(l=>l.id===form.dataset.id), amount=num(fd.get("amount"));
+        if(!loan||amount<=0||amount>balance(loan)+0.000001){toast("Enter a payment up to the remaining balance.","error");return;}
+        loan.payments.push({date:String(fd.get("date")||today()),amount:Math.min(amount,balance(loan)),note:String(fd.get("note")||"").trim()});
+        if(balance(loan)<=0.005){loan.status="paid_in_full";}
+        persist();closeModal();render();toast(loan.status==="paid_in_full"?"Loan paid in full!":"Payment recorded");return;
+      }
+      if(formId==="settings-form") {
+        settings={...settings,venmo:String(fd.get("venmo")||"").trim().replace(/^@/,""),cashapp:String(fd.get("cashapp")||"").trim().replace(/^\$/,""),zelle:String(fd.get("zelle")||"").trim(),theme:dark?"dark":"light"};
+        persist();closeModal();render();toast("Settings saved");return;
+      }
+    });
+    document.addEventListener("click",event=>{
+      const button=event.target.closest("[data-action]");if(!button)return;
+      const id=button.dataset.id,type=button.dataset.action;
+      if(type==="edit"){const loan=loans.find(l=>l.id===id);if(loan)loanForm(loan);}
+      if(type==="archive"){const loan=loans.find(l=>l.id===id);if(loan){loan.status="archived";persist();closeModal();render();toast("Loan archived");}}
+      if(type==="restore"){const loan=loans.find(l=>l.id===id);if(loan){loan.status=balance(loan)<=0?"paid_in_full":"active";persist();closeModal();render();toast("Loan restored");}}
+      if(type==="delete-loan"){const loan=loans.find(l=>l.id===id);if(loan&&confirm(`Permanently delete the loan for ${loan.borrowerName}?`)){loans=loans.filter(l=>l.id!==id);persist();closeModal();render();toast("Loan deleted");}}
+    });
+    window.addEventListener("hashchange",render);
+    setTheme();render();
+  })();
+  </script>
+</body>
+</html>
