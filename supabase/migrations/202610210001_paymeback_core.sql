@@ -178,6 +178,7 @@ set search_path = ''
 as $$
 declare
   v_index integer;
+  v_version integer;
   v_due date;
   v_amount bigint;
   v_last_amount bigint;
