@@ -1,0 +1,897 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f7fb">
+  <meta name="description" content="A private, clear way to track personal loans and repayment plans.">
+  <title>PayMeBack - Personal Loan &amp; IOU Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: "class", theme: { extend: { colors: { brand: "#625bf6" } } } };
+    window.PAYMEBACK_CONFIG = {
+      supabaseUrl: "https://wguyfniwmthdxghsgnxa.supabase.co",
+      supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndndXlmbml3bXRoZHhnaHNnbnhhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4NzE1NTMsImV4cCI6MjEwODQ0NzU1M30.7UV-IT_zyL-xVWqpyiS7gihlGvLnXr3irrrFM32snPU"
+    };
+  </script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <style>
+    :root { color-scheme:light; --page:#f6f7fb; --surface:#fff; --line:#e9eaf1; --text:#172033; --muted:#788197; }
+    html.dark { color-scheme:dark; --page:#0e1220; --surface:#171c2b; --line:#2a3042; --text:#edf0fa; --muted:#9aa4ba; }
+    body { background:var(--page); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    .surface { background:var(--surface); border:1px solid var(--line); }
+    .muted { color:var(--muted); }
+    .field { width:100%; border:1px solid var(--line); border-radius:.75rem; background:var(--surface); color:var(--text); padding:.7rem .85rem; outline:none; }
+    .field:focus { border-color:#817cf9; box-shadow:0 0 0 3px #625bf61c; }
+    .field::placeholder { color:var(--muted); }
+    .field:disabled { opacity:.6; cursor:not-allowed; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; gap:.5rem; border-radius:.75rem; padding:.67rem .95rem; font-weight:650; transition:all .15s; white-space:nowrap; }
+    .btn-primary { color:#fff; background:#625bf6; box-shadow:0 4px 12px #625bf62b; }
+    .btn-primary:hover { background:#5049e8; transform:translateY(-1px); }
+    .btn-soft { color:var(--text); background:var(--surface); border:1px solid var(--line); }
+    .btn-soft:hover { border-color:#c8c6ff; color:#625bf6; }
+    .btn-danger { color:#dc2626; background:color-mix(in srgb,var(--surface) 90%,#fee2e2); border:1px solid #fecaca; }
+    .icon-btn { display:inline-flex; align-items:center; justify-content:center; width:2.35rem; height:2.35rem; border-radius:.7rem; color:var(--muted); }
+    .icon-btn:hover { background:color-mix(in srgb,var(--page) 82%,#625bf6 18%); color:var(--text); }
+    .card { border-radius:1rem; box-shadow:0 2px 10px #19234a08; }
+    .metric-icon { width:2.6rem; height:2.6rem; display:grid; place-items:center; border-radius:.8rem; }
+    .modal-backdrop { position:fixed; inset:0; z-index:50; display:grid; place-items:center; padding:1rem; background:#0b1020a6; backdrop-filter:blur(5px); }
+    .modal-panel { width:min(100%,38rem); max-height:min(92vh,56rem); overflow:auto; }
+    .overdue { border-color:#fecaca!important; background:linear-gradient(110deg,color-mix(in srgb,var(--surface) 95%,#fee2e2),var(--surface)); }
+    .nav-active { color:#625bf6; background:#625bf610; }
+    .empty-dash { background-image:linear-gradient(135deg,#625bf60c 25%,transparent 25%,transparent 50%,#625bf60c 50%,#625bf60c 75%,transparent 75%); background-size:12px 12px; }
+    .legal-copy h2 { margin:1.5rem 0 .5rem; font-weight:750; font-size:1.05rem; }
+    .legal-copy p,.legal-copy li { color:var(--muted); font-size:.9rem; line-height:1.7; }
+    .legal-copy ul { list-style:disc; padding-left:1.25rem; margin:.5rem 0; }
+    @media (max-width:640px) { .modal-backdrop { padding:.5rem; align-items:end; } .modal-panel { border-radius:1.2rem 1.2rem .8rem .8rem; } }
+  </style>
+</head>
+<body class="min-h-screen">
+  <main id="app" class="min-h-screen"></main>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="fixed z-[80] bottom-4 right-4 flex flex-col gap-2" aria-live="polite"></div>
+  <input id="import-file" type="file" accept=".json,.csv,application/json,text/csv" class="hidden">
+  <script>
+  (() => {
+    "use strict";
+
+    const LOANS_KEY = "paymeback.loans.v1";
+    const SETTINGS_KEY = "paymeback.settings.v1";
+    const CONFIG_KEY = "paymeback.supabase-config.v1";
+    const MIGRATION_KEY = userId => `paymeback.migration.v1.${userId}`;
+    const $ = (selector, root = document) => root.querySelector(selector);
+    const today = () => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    };
+    const escapeHTML = value => String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[char]));
+    const parseJSON = (text, fallback) => { try { return JSON.parse(text) ?? fallback; } catch (_) { return fallback; } };
+    const dollarsToCents = value => {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 90000000000000) return 0;
+      return Math.round((parsed + Number.EPSILON) * 100);
+    };
+    const centsToDollars = cents => (Number(cents || 0) / 100).toFixed(2);
+    const money = cents => new Intl.NumberFormat(undefined, { style:"currency", currency:"USD" }).format(Number(cents || 0) / 100);
+    const dateLabel = value => {
+      if (!value) return "No due date";
+      const date = new Date(`${value}T00:00:00`);
+      return Number.isNaN(date.getTime()) ? "No due date" : date.toLocaleDateString(undefined, { month:"short", day:"numeric", year:"numeric" });
+    };
+    const safeDate = value => {
+      const text=String(value||"");
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(text))return "";
+      const [year,month,day]=text.split("-").map(Number);
+      const date=new Date(Date.UTC(year,month-1,day));
+      return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day?text:"";
+    };
+    const newId = () => crypto.randomUUID();
+
+    let supabase = null;
+    let user = null;
+    let session = null;
+    let loans = [];
+    let settings = { venmo:"", cashapp:"", zelle:"", theme:"light" };
+    let accountHasSettings = false;
+    let dark = false;
+    let filter = "active";
+    let sortBy = "balance";
+    let search = "";
+    let authMode = "signin";
+    let passwordRecovery = false;
+    let pendingVerificationEmail = "";
+    let currentView = "loading";
+
+    function toast(message, error = false) {
+      const box = document.createElement("div");
+      box.className = `surface card flex items-center gap-2 px-4 py-3 text-sm shadow-lg ${error ? "text-rose-600" : ""}`;
+      box.innerHTML = `<i data-lucide="${error ? "circle-alert" : "check"}" class="h-4 w-4"></i>${escapeHTML(message)}`;
+      $("#toast-root").append(box);
+      window.lucide?.createIcons();
+      setTimeout(() => box.remove(), 3800);
+    }
+    function setTheme() {
+      document.documentElement.classList.toggle("dark", dark);
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#0e1220" : "#f6f7fb");
+    }
+    function closeModal() { $("#modal-root").innerHTML = ""; }
+    function openModal(title, content) {
+      $("#modal-root").innerHTML = `<div class="modal-backdrop" data-action="backdrop"><section class="modal-panel surface card p-5 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="mb-5 flex items-center justify-between gap-3"><h2 id="modal-title" class="text-lg font-extrabold">${escapeHTML(title)}</h2><button class="icon-btn" data-action="close-modal" aria-label="Close"><i data-lucide="x" class="h-5 w-5"></i></button></div>${content}</section></div>`;
+      window.lucide?.createIcons();
+      $("#modal-root .field")?.focus();
+    }
+    function config() {
+      const bundled = window.PAYMEBACK_CONFIG || {};
+      const stored = parseJSON(localStorage.getItem(CONFIG_KEY), {});
+      const supabaseUrl = String(bundled.supabaseUrl || stored.supabaseUrl || "").trim();
+      const supabaseAnonKey = String(bundled.supabaseAnonKey || stored.supabaseAnonKey || "").trim();
+      return { supabaseUrl, supabaseAnonKey };
+    }
+    function hasConfig() {
+      const value = config();
+      return /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(value.supabaseUrl) && value.supabaseAnonKey.length > 20;
+    }
+    function getShareToken() {
+      const match = location.hash.match(/^#share=([A-Za-z0-9_-]{40,64})$/);
+      return match ? match[1] : "";
+    }
+    function stripHash() {
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    function initClient() {
+      if (!window.supabase?.createClient) throw new Error("Supabase client failed to load. Check your connection and refresh.");
+      const value = config();
+      supabase = window.supabase.createClient(value.supabaseUrl, value.supabaseAnonKey, {
+        auth: { flowType:"pkce", autoRefreshToken:true, persistSession:true, detectSessionInUrl:true }
+      });
+    }
+    async function start() {
+      dark = parseJSON(localStorage.getItem(SETTINGS_KEY), {}).theme === "dark";
+      setTheme();
+      const token = getShareToken();
+      if (location.hash.startsWith("#share=")) {
+        stripHash();
+        if (!token) { renderShareError("This statement link is incomplete or no longer supported. Ask the sender to create a new link."); return; }
+        if (!hasConfig()) { renderConfig("This statement link needs the app’s Supabase project configuration. The published app owner must configure it before the link can load."); return; }
+        try { initClient(); await renderSharedStatement(token); }
+        catch (error) { renderShareError(error?.message || "This statement could not be loaded."); }
+        return;
+      }
+      if (location.hash === "#terms") { renderPolicy("terms"); return; }
+      if (location.hash === "#privacy") { renderPolicy("privacy"); return; }
+      if (!hasConfig()) { renderConfig(); return; }
+      try {
+        initClient();
+        supabase.auth.onAuthStateChange((event, nextSession) => {
+          if (event === "PASSWORD_RECOVERY") {
+            passwordRecovery = true;
+            renderPasswordReset();
+            return;
+          }
+          setTimeout(() => handleSessionChange(event, nextSession), 0);
+        });
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        session = data.session;
+        user = session?.user || null;
+        if (passwordRecovery) renderPasswordReset();
+        else if (user) await loadWorkspace();
+        else renderAuth();
+      } catch (error) {
+        renderConfig(error?.message || "Supabase could not be initialized.");
+      }
+    }
+    async function handleSessionChange(event, nextSession) {
+      const oldId = user?.id || "";
+      session = nextSession;
+      user = nextSession?.user || null;
+      if (!user) {
+        loans = [];
+        settings = { venmo:"", cashapp:"", zelle:"", theme:dark?"dark":"light" };
+        closeModal();
+        if (currentView !== "auth") renderAuth();
+        return;
+      }
+      if (oldId !== user.id || event === "SIGNED_IN" || currentView === "auth") {
+        try { await loadWorkspace(); }
+        catch (error) { showLoadError(error); }
+      }
+    }
+    function brand(compact = false) {
+      return `<a href="#" class="flex items-center gap-2.5 no-underline" data-action="home"><span class="grid h-10 w-10 place-items-center rounded-xl bg-indigo-600 text-white shadow-lg shadow-indigo-600/20"><i data-lucide="hand-coins" class="h-5 w-5"></i></span><span><span class="block text-base font-extrabold leading-5 tracking-tight">PayMeBack</span>${compact ? "" : '<span class="block text-[10px] font-medium tracking-wide muted">PERSONAL LOAN TRACKER</span>'}</span></a>`;
+    }
+    function renderConfig(message = "") {
+      currentView = "config";
+      const current = config();
+      $("#app").innerHTML = `<div class="mx-auto flex min-h-screen max-w-5xl flex-col px-4 py-6 sm:px-8">
+        <header class="mb-10">${brand()}</header>
+        <div class="grid flex-1 items-center gap-10 lg:grid-cols-[1fr_.9fr]">
+          <section><p class="mb-3 inline-flex items-center gap-2 rounded-full bg-indigo-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-indigo-600"><i data-lucide="shield-check" class="h-3.5 w-3.5"></i>Hosted accounts require setup</p><h1 class="text-3xl font-extrabold tracking-tight sm:text-4xl">A clearer way to lend with confidence.</h1><p class="mt-4 max-w-xl leading-7 muted">PayMeBack now uses Supabase for verified sign-in, private cloud records, and revocable borrower statements. This page does not store your account data locally as a substitute for security.</p><div class="mt-6 flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-500/[.08] p-4 text-sm leading-6 text-amber-800 dark:text-amber-200"><i data-lucide="triangle-alert" class="mt-0.5 h-5 w-5 shrink-0"></i><p>To enable accounts, configure your Supabase project below or add its public URL and anon key to <code>window.PAYMEBACK_CONFIG</code> in this hosted app. Never use a service-role key in a browser.</p></div></section>
+          <section class="surface card p-5 sm:p-7"><h2 class="text-xl font-extrabold">Connect Supabase</h2><p class="mt-2 text-sm leading-6 muted">Use the project URL and public anon/publishable key from your Supabase project settings. Browser-visible keys are expected; database RLS protects user data.</p>
+            ${message ? `<p class="mt-4 rounded-xl bg-rose-500/10 p-3 text-sm text-rose-600">${escapeHTML(message)}</p>` : ""}
+            <form id="config-form" class="mt-5 space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="supabase-url">Project URL</label><input required class="field" id="supabase-url" name="supabaseUrl" type="url" placeholder="https://your-project.supabase.co" value="${escapeHTML(current.supabaseUrl)}"></div><div><label class="mb-1.5 block text-xs font-semibold" for="supabase-key">Public anon/publishable key</label><textarea required class="field min-h-24 resize-y break-all font-mono text-xs" id="supabase-key" name="supabaseAnonKey" placeholder="eyJ… or sb_publishable_…">${escapeHTML(current.supabaseAnonKey)}</textarea></div><button class="btn btn-primary w-full" type="submit"><i data-lucide="plug-zap" class="h-4 w-4"></i>Connect securely</button></form>
+            <div class="mt-5 border-t border-[var(--line)] pt-4 text-xs leading-5 muted"><p><strong>Before connecting:</strong> apply the SQL migration and configure email verification. Read <a class="text-indigo-500 underline" href="SUPABASE_SETUP.md">the setup guide</a>.</p><p class="mt-2">Config saved in this browser is not shared with borrowers. Production share links require the deployed HTML to contain your public project configuration.</p></div>
+          </section>
+        </div>
+        <footer class="mt-8 flex justify-center gap-4 py-4 text-xs muted"><a class="hover:text-indigo-500" href="#terms">Terms</a><a class="hover:text-indigo-500" href="#privacy">Privacy</a></footer>
+      </div>`;
+      window.lucide?.createIcons();
+    }
+    function renderAuth(message = "") {
+      currentView = "auth";
+      const signup = authMode === "signup";
+      const recover = authMode === "recover";
+      $("#app").innerHTML = `<div class="mx-auto flex min-h-screen max-w-5xl flex-col px-4 py-6 sm:px-8">
+        <header class="mb-7">${brand()}</header>
+        <div class="grid flex-1 items-center gap-10 lg:grid-cols-[1fr_.85fr]">
+          <section class="hidden lg:block"><p class="mb-3 inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-emerald-600"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Clear terms. Calm reminders.</p><h1 class="max-w-xl text-4xl font-extrabold leading-tight tracking-tight">Good relationships deserve clear records.</h1><p class="mt-4 max-w-lg text-base leading-7 muted">Plan repayments, log partial payments, and share a private, read-only statement with your borrower.</p><div class="mt-8 grid max-w-lg grid-cols-2 gap-3"><div class="surface card p-4"><i data-lucide="calendar-check" class="mb-3 h-5 w-5 text-indigo-500"></i><p class="text-sm font-bold">Repayment plans</p><p class="mt-1 text-xs leading-5 muted">Know what’s due and when.</p></div><div class="surface card p-4"><i data-lucide="link-2" class="mb-3 h-5 w-5 text-emerald-500"></i><p class="text-sm font-bold">Private statements</p><p class="mt-1 text-xs leading-5 muted">Revocable links, never data in URLs.</p></div></div></section>
+          <section class="surface card mx-auto w-full max-w-md p-5 sm:p-7"><div class="mb-5"><p class="text-xs font-bold uppercase tracking-wider text-indigo-500">${recover ? "Account recovery" : signup ? "Create your account" : "Welcome back"}</p><h2 class="mt-1 text-2xl font-extrabold">${recover ? "Reset your password" : signup ? "Start with a clear record." : "Sign in to PayMeBack"}</h2></div>
+            ${message ? `<p class="mb-4 rounded-xl ${message.startsWith("Error:")?"bg-rose-500/10 text-rose-600":"bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"} p-3 text-sm leading-5" role="status">${escapeHTML(message.replace(/^Error:\\s*/,""))}</p>` : ""}
+            ${pendingVerificationEmail?`<button type="button" class="mb-4 text-left text-xs font-semibold text-indigo-500 underline" data-action="resend-verification">Resend verification email to ${escapeHTML(pendingVerificationEmail)}</button>`:""}
+            ${!recover ? `<div class="mb-5 grid grid-cols-2 rounded-xl bg-slate-500/[.06] p-1"><button type="button" data-action="auth-mode" data-mode="signin" class="rounded-lg px-3 py-2 text-sm font-semibold ${!signup?"bg-[var(--surface)] shadow-sm": "muted"}">Sign in</button><button type="button" data-action="auth-mode" data-mode="signup" class="rounded-lg px-3 py-2 text-sm font-semibold ${signup?"bg-[var(--surface)] shadow-sm":"muted"}">Create account</button></div>` : ""}
+            <form id="auth-form" data-mode="${recover?"recover":signup?"signup":"signin"}" class="space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="auth-email">Email address</label><input required type="email" autocomplete="email" class="field" id="auth-email" name="email" placeholder="you@example.com"></div>
+              ${!recover?`<div><label class="mb-1.5 block text-xs font-semibold" for="auth-password">Password</label><input required type="password" minlength="8" autocomplete="${signup?"new-password":"current-password"}" class="field" id="auth-password" name="password" placeholder="At least 8 characters"></div>`:""}
+              ${signup?`<label class="flex items-start gap-2.5 text-xs leading-5 muted"><input required type="checkbox" name="termsConsent" class="mt-1 accent-indigo-600"><span>I agree to the <a href="#terms" class="text-indigo-500 underline">Terms</a> and acknowledge the <a href="#privacy" class="text-indigo-500 underline">Privacy Policy</a>.</span></label>`:""}
+              <button class="btn btn-primary w-full" type="submit"><i data-lucide="${recover?"mail":signup?"user-round-plus":"log-in"}" class="h-4 w-4"></i>${recover?"Send reset link":signup?"Create account":"Sign in"}</button>
+            </form>
+            ${!signup&&!recover?`<button class="mt-4 text-xs font-semibold text-indigo-500 hover:underline" data-action="auth-mode" data-mode="recover">Forgot your password?</button>`:""}
+            ${recover?`<button class="mt-4 text-xs font-semibold text-indigo-500 hover:underline" data-action="auth-mode" data-mode="signin">Back to sign in</button>`:""}
+            <p class="mt-5 text-center text-[11px] leading-5 muted">Email verification is required. PayMeBack records informal personal loans and does not process payments.</p>
+          </section>
+        </div><footer class="mt-8 flex justify-center gap-4 py-4 text-xs muted"><a href="#terms" class="hover:text-indigo-500">Terms</a><a href="#privacy" class="hover:text-indigo-500">Privacy</a></footer>
+      </div>`;
+      window.lucide?.createIcons();
+    }
+    function renderPasswordReset(message = "") {
+      currentView = "reset";
+      $("#app").innerHTML = `<div class="mx-auto flex min-h-screen max-w-lg items-center px-4 py-8"><section class="surface card w-full p-6 sm:p-8">${brand()}<h1 class="mt-7 text-2xl font-extrabold">Choose a new password</h1><p class="mt-2 text-sm leading-6 muted">Use at least 8 characters. The reset link must still be valid.</p>${message?`<p class="mt-4 rounded-xl bg-rose-500/10 p-3 text-sm text-rose-600">${escapeHTML(message)}</p>`:""}<form id="password-reset-form" class="mt-5 space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="new-password">New password</label><input required minlength="8" type="password" autocomplete="new-password" class="field" id="new-password" name="password"></div><button class="btn btn-primary w-full" type="submit">Update password</button></form></section></div>`;
+      window.lucide?.createIcons();
+    }
+
+    async function loadWorkspace() {
+      if (!user) { renderAuth(); return; }
+      currentView = "loading";
+      $("#app").innerHTML = `<div class="grid min-h-screen place-items-center"><div class="text-center"><div class="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent"></div><p class="text-sm muted">Loading your private workspace…</p></div></div>`;
+      const [loanResult, paymentResult, installmentResult, adjustmentResult, settingsResult, historyResult] = await Promise.all([
+        supabase.from("loans").select("*").order("created_at", { ascending:false }),
+        supabase.from("payments").select("*").order("payment_date", { ascending:false }),
+        supabase.from("installments").select("*").order("installment_number"),
+        supabase.from("loan_adjustments").select("*").order("adjustment_date", { ascending:false }),
+        supabase.from("user_settings").select("*").eq("user_id", user.id).maybeSingle(),
+        supabase.from("loan_plan_history").select("*").order("changed_at",{ascending:false})
+      ]);
+      for (const result of [loanResult,paymentResult,installmentResult,adjustmentResult,settingsResult,historyResult]) if (result.error) throw result.error;
+      const group = (rows, key) => rows.reduce((map,row) => { (map[row[key]] ||= []).push(row); return map; }, {});
+      const paymentsByLoan = group(paymentResult.data || [], "loan_id");
+      const installmentsByLoan = group(installmentResult.data || [], "loan_id");
+      const adjustmentsByLoan = group(adjustmentResult.data || [], "loan_id");
+      const historyByLoan = group(historyResult.data || [], "loan_id");
+      loans = (loanResult.data || []).map(row => ({
+        ...row,
+        payments:paymentsByLoan[row.id] || [],
+        installments:installmentsByLoan[row.id] || [],
+        adjustments:adjustmentsByLoan[row.id] || [],
+        planHistory:historyByLoan[row.id] || []
+      }));
+      accountHasSettings = !!settingsResult.data;
+      if (settingsResult.data) settings = {
+        venmo:settingsResult.data.venmo || "", cashapp:settingsResult.data.cashapp || "",
+        zelle:settingsResult.data.zelle || "", theme:settingsResult.data.theme || "light"
+      };
+      else settings = { venmo:"", cashapp:"", zelle:"", theme:parseJSON(localStorage.getItem(SETTINGS_KEY), {}).theme==="dark"?"dark":"light" };
+      dark = settings.theme === "dark";
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ theme:settings.theme }));
+      setTheme();
+      currentView = "dashboard";
+      renderDashboard();
+    }
+    function showLoadError(error) {
+      currentView = "error";
+      $("#app").innerHTML = `<div class="mx-auto flex min-h-screen max-w-lg items-center px-4"><section class="surface card w-full p-7 text-center"><div class="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-rose-500/10 text-rose-600"><i data-lucide="cloud-off" class="h-6 w-6"></i></div><h1 class="text-xl font-extrabold">Couldn’t load your records</h1><p class="mt-2 text-sm leading-6 muted">${escapeHTML(error?.message || "Check your connection and Supabase setup, then try again.")}</p><div class="mt-5 flex justify-center gap-2"><button class="btn btn-soft" data-action="retry">Try again</button><button class="btn btn-soft" data-action="signout">Sign out</button></div></section></div>`;
+      window.lucide?.createIcons();
+    }
+    function paidCents(loan) { return (loan.payments || []).reduce((sum,p) => sum + Number(p.amount_cents || 0), 0); }
+    function forgivenCents(loan) { return (loan.adjustments || []).reduce((sum,a) => sum + Number(a.amount_cents || 0), 0); }
+    function balanceCents(loan) { return Math.max(0, Number(loan.initial_amount_cents || 0) - paidCents(loan) - forgivenCents(loan)); }
+    function isOverdue(loan) {
+      if (loan.status !== "active" || balanceCents(loan) <= 0) return false;
+      return (loan.installments || []).some(i => i.is_current && i.due_date && i.due_date < today() && Number(i.paid_cents) + Number(i.forgiven_cents || 0) < Number(i.amount_due_cents))
+        || (!loan.installments?.length && loan.target_due_date && loan.target_due_date < today());
+    }
+    function nextInstallment(loan) {
+      return (loan.installments || []).find(i => i.is_current && Number(i.paid_cents) + Number(i.forgiven_cents || 0) < Number(i.amount_due_cents));
+    }
+    function planLabel(loan) {
+      if (loan.repayment_type === "installment") return `${money(loan.installment_amount_cents)} monthly · ${loan.installment_count} payments`;
+      if (loan.repayment_type === "one_time") return "One-time repayment";
+      return "Flexible repayment";
+    }
+    function renderDashboard() {
+      if (currentView !== "dashboard") return;
+      const active = loans.filter(l => l.status === "active");
+      const lent = loans.reduce((sum,l) => sum + Number(l.initial_amount_cents || 0), 0);
+      const collected = loans.reduce((sum,l) => sum + paidCents(l), 0);
+      const outstanding = active.reduce((sum,l) => sum + balanceCents(l), 0);
+      let shown = loans.filter(l => {
+        if (filter === "active" && l.status !== "active") return false;
+        if (filter === "paid" && l.status !== "paid_in_full") return false;
+        if (filter === "archived" && l.status !== "archived") return false;
+        if (filter === "all" && l.status === "archived") return false;
+        const q = search.trim().toLowerCase();
+        return !q || l.borrower_name.toLowerCase().includes(q) || (l.reason || "").toLowerCase().includes(q);
+      });
+      shown.sort((a,b) => sortBy === "name" ? a.borrower_name.localeCompare(b.borrower_name)
+        : sortBy === "due" ? (nextInstallment(a)?.due_date || a.target_due_date || "9999").localeCompare(nextInstallment(b)?.due_date || b.target_due_date || "9999")
+        : balanceCents(b) - balanceCents(a));
+      const oldLoans = parseJSON(localStorage.getItem(LOANS_KEY), []);
+      const migrationDone = localStorage.getItem(MIGRATION_KEY(user.id)) === "yes";
+      $("#app").innerHTML = `<div class="mx-auto flex min-h-screen max-w-[1440px]">
+        <aside class="hidden w-64 shrink-0 flex-col border-r border-[var(--line)] bg-[var(--surface)] px-5 py-7 lg:flex">${brand()}<p class="mb-3 mt-10 px-3 text-[10px] font-bold uppercase tracking-[.18em] muted">Workspace</p><button class="nav-active flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold"><i data-lucide="layout-dashboard" class="h-4 w-4"></i>Overview</button><button class="mt-auto rounded-2xl bg-indigo-500/[.06] p-4 text-left"><span class="mb-2 grid h-8 w-8 place-items-center rounded-lg bg-indigo-500/10 text-indigo-500"><i data-lucide="shield-check" class="h-4 w-4"></i></span><span class="text-sm font-bold">Private by design</span><span class="mt-1 block text-xs leading-5 muted">Your records are protected by your account and database access rules.</span></button></aside>
+        <section class="min-w-0 flex-1 px-4 pb-12 pt-5 sm:px-7 lg:px-10 lg:pt-8">
+          <header class="mb-8 flex items-center justify-between gap-3"><div class="lg:hidden">${brand(true)}</div><div class="hidden lg:block"><p class="text-sm muted">${escapeHTML(user.email || "Your personal workspace")}</p></div><div class="ml-auto flex items-center gap-2"><button class="btn btn-soft !px-3" data-action="theme"><i data-lucide="${dark?"sun":"moon"}" class="h-4 w-4"></i><span class="hidden sm:inline">${dark?"Light":"Dark"} mode</span></button><button class="btn btn-soft !px-3" data-action="settings" aria-label="Settings"><i data-lucide="settings-2" class="h-4 w-4"></i></button><button class="btn btn-primary" data-action="new-loan"><i data-lucide="plus" class="h-4 w-4"></i><span class="hidden sm:inline">New loan</span><span class="sm:hidden">Add</span></button></div></header>
+          <div class="mb-7"><p class="mb-2 inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-emerald-600"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Email verified account</p><h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl">Your lending, clearly in view.</h1><p class="mt-2 text-sm muted">Track repayment plans, payments, and friendly follow-ups.</p></div>
+          ${!migrationDone && oldLoans.length?`<section class="surface card mb-5 flex flex-col gap-3 border-indigo-200 bg-indigo-500/[.04] p-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 class="font-bold">Import your existing local loans?</h2><p class="mt-1 text-xs leading-5 muted">${oldLoans.length} record${oldLoans.length===1?"":"s"} found on this browser. They will be added to your account; local data will remain untouched.</p></div><button class="btn btn-primary" data-action="migrate"><i data-lucide="database-backup" class="h-4 w-4"></i>Review &amp; import</button></section>`:""}
+          <div class="mb-7 grid grid-cols-2 gap-3 xl:grid-cols-4">${metric("hand-coins","Total amount lent",money(lent),"text-indigo-600","bg-indigo-500/10")}${metric("arrow-down-left","Total collected",money(collected),"text-emerald-600","bg-emerald-500/10")}${metric("wallet","Outstanding balance",money(outstanding),"text-amber-600","bg-amber-500/10")}${metric("users-round","Active debtors",active.length,"text-sky-600","bg-sky-500/10")}</div>
+          <section class="surface card mb-6 flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5"><div><h2 class="font-bold">Your loans</h2><p class="mt-1 text-xs muted">${shown.length} ${shown.length===1?"record":"records"} in this view</p></div><div class="flex flex-col gap-2 sm:flex-row"><label class="relative min-w-0 sm:w-56"><i data-lucide="search" class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 muted"></i><input class="field !py-2 !pl-9 text-sm" id="search" placeholder="Search borrowers or notes…" value="${escapeHTML(search)}"></label><select class="field !w-auto !py-2 text-sm" id="sort"><option value="balance" ${sortBy==="balance"?"selected":""}>Sort: balance</option><option value="due" ${sortBy==="due"?"selected":""}>Sort: due date</option><option value="name" ${sortBy==="name"?"selected":""}>Sort: name</option></select></div></section>
+          <div class="mb-4 flex gap-1 overflow-x-auto border-b border-[var(--line)]" role="tablist">${tab("active","Active")}${tab("paid","Paid off")}${tab("all","All loans")}${tab("archived","Archived")}</div>
+          <section id="loan-list" class="grid gap-3 xl:grid-cols-2">${shown.length?shown.map(loanCard).join(""):emptyState()}</section>
+          <footer class="mt-10 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] pt-5 text-xs muted"><span><i data-lucide="cloud" class="mr-1 inline h-3.5 w-3.5 align-[-2px]"></i>Account data in your private Supabase workspace</span><div class="flex flex-wrap gap-2"><button class="hover:text-indigo-500" data-action="export-json">Export JSON</button><span>·</span><button class="hover:text-indigo-500" data-action="export-csv">Export CSV</button><span>·</span><button class="hover:text-indigo-500" data-action="import">Import backup</button><span>·</span><a href="#terms" class="hover:text-indigo-500">Terms</a><span>·</span><a href="#privacy" class="hover:text-indigo-500">Privacy</a><span>·</span><button class="hover:text-indigo-500" data-action="signout">Sign out</button></div></footer>
+        </section></div>`;
+      window.lucide?.createIcons();
+    }
+    function metric(icon,title,value,color,bg) {
+      return `<article class="surface card flex min-w-0 items-center gap-3 p-3.5 sm:p-5"><div class="metric-icon shrink-0 ${bg} ${color}"><i data-lucide="${icon}" class="h-5 w-5"></i></div><div class="min-w-0"><p class="truncate text-[11px] font-medium muted sm:text-xs">${title}</p><p class="mt-1 truncate text-lg font-extrabold tracking-tight sm:text-2xl">${value}</p></div></article>`;
+    }
+    function tab(id,label) {
+      return `<button role="tab" aria-selected="${filter===id}" data-filter="${id}" class="whitespace-nowrap border-b-2 px-3 pb-3 text-sm font-semibold ${filter===id?"border-indigo-500 text-indigo-500":"border-transparent muted hover:text-[var(--text)]"}">${label}</button>`;
+    }
+    function initials(name) { return String(name || "?").trim().split(/\s+/).slice(0,2).map(w=>w[0]||"").join("").toUpperCase(); }
+    function loanCard(loan) {
+      const total = Number(loan.initial_amount_cents || 0);
+      const left = balanceCents(loan);
+      const paid = total - left;
+      const pct = total ? Math.min(100,Math.round(paid/total*100)) : 100;
+      const overdue = isOverdue(loan);
+      const next = nextInstallment(loan);
+      const status = loan.status==="paid_in_full"?"Paid off":loan.status==="archived"?"Archived":overdue?"Overdue":"Active";
+      const badge = loan.status==="paid_in_full"?"bg-emerald-500/10 text-emerald-600":loan.status==="archived"?"bg-slate-500/10 muted":overdue?"bg-rose-500/10 text-rose-600":"bg-indigo-500/10 text-indigo-600";
+      const due = next?.due_date || loan.target_due_date || "";
+      return `<article class="surface card ${overdue?"overdue":""} p-4 sm:p-5"><div class="flex items-start justify-between gap-3"><div class="flex min-w-0 items-center gap-3"><div class="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-500/15 to-emerald-500/15 text-sm font-bold text-indigo-600">${escapeHTML(initials(loan.borrower_name))}</div><div class="min-w-0"><h3 class="truncate font-bold">${escapeHTML(loan.borrower_name)}</h3><p class="mt-0.5 truncate text-xs muted">${escapeHTML(loan.reason || planLabel(loan))}</p></div></div><div class="flex shrink-0 items-center gap-1"><span class="rounded-full px-2.5 py-1 text-[10px] font-bold ${badge}">${status}</span><button class="icon-btn !h-8 !w-8" data-action="loan-menu" data-id="${loan.id}" aria-label="Loan actions"><i data-lucide="ellipsis" class="h-4 w-4"></i></button></div></div>
+        <div class="mt-4 flex items-center justify-between gap-3 rounded-xl bg-slate-500/[.04] px-3 py-2"><p class="truncate text-xs font-semibold">${escapeHTML(planLabel(loan))}</p>${loan.repayment_type==="installment"?`<span class="shrink-0 text-[10px] muted">${loan.installment_count} installments</span>`:""}</div>
+        <div class="mt-4 grid grid-cols-2 gap-3"><div><p class="text-[11px] muted">Remaining</p><p class="mt-1 text-xl font-extrabold tracking-tight">${money(left)}</p></div><div class="text-right"><p class="text-[11px] muted">Original loan</p><p class="mt-1 font-bold">${money(total)}</p></div></div>
+        <div class="mt-4"><div class="mb-1.5 flex justify-between text-[10px] font-medium muted"><span>${pct}% repaid</span><span>${money(paid)} collected</span></div><div class="h-1.5 overflow-hidden rounded-full bg-slate-500/10"><div class="h-full rounded-full bg-gradient-to-r from-indigo-500 to-emerald-400" style="width:${pct}%"></div></div></div>
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)] pt-3"><p class="text-[11px] ${overdue?"font-semibold text-rose-600":"muted"}"><i data-lucide="${overdue?"triangle-alert":"calendar-days"}" class="mr-1 inline h-3.5 w-3.5 align-[-2px]"></i>${due?`${overdue?"Past due":"Next due"} ${dateLabel(due)}`:`Started ${dateLabel(loan.start_date)}`}</p><div class="flex gap-1"><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="history" data-id="${loan.id}"><i data-lucide="list-checks" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Details</span></button><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="share" data-id="${loan.id}" title="Share statement"><i data-lucide="link-2" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Share</span></button>${loan.status!=="archived"&&left>0?`<button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="payment" data-id="${loan.id}"><i data-lucide="plus" class="h-3.5 w-3.5"></i>Payment</button>`:""}<button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="reminder" data-id="${loan.id}"><i data-lucide="message-circle" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Remind</span></button></div></div></article>`;
+    }
+    function emptyState() {
+      const title = search ? "No matches found" : filter==="paid" ? "No paid-off loans yet" : filter==="archived" ? "Nothing archived" : "Start tracking your first loan";
+      return `<div class="surface card empty-dash col-span-full flex flex-col items-center px-5 py-12 text-center"><div class="mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-indigo-500/10 text-indigo-500"><i data-lucide="${search?"search":"hand-coins"}" class="h-6 w-6"></i></div><h3 class="font-bold">${title}</h3><p class="mt-1 max-w-sm text-sm muted">${search?"Try another borrower name or reason.":"Add a loan to keep balances, plans, and payments organized."}</p>${!search&&filter==="active"?'<button class="btn btn-primary mt-5" data-action="new-loan"><i data-lucide="plus" class="h-4 w-4"></i>Add a loan</button>':""}</div>`;
+    }
+
+    function loanForm(loan = null) {
+      const edit = !!loan;
+      const hasHistory = !!(loan?.payments.length || loan?.adjustments.length);
+      openModal(edit?"Edit loan":"Create a loan", `<form id="loan-form" data-id="${loan?.id || ""}" class="space-y-4">
+        <div><label class="mb-1.5 block text-xs font-semibold" for="borrower">Borrower name *</label><input required maxlength="120" class="field" id="borrower" name="borrowerName" value="${escapeHTML(loan?.borrower_name || "")}" placeholder="e.g. Alex Morgan"></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="contact">Contact <span class="font-normal muted">(optional)</span></label><input maxlength="200" class="field" id="contact" name="borrowerContact" value="${escapeHTML(loan?.borrower_contact || "")}" placeholder="Phone or email"></div>
+        <div class="grid grid-cols-2 gap-3"><div><label class="mb-1.5 block text-xs font-semibold" for="principal">Total amount lent *</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">$</span><input required min="0.01" step="0.01" type="number" class="field !pl-7" id="principal" name="principal" value="${loan?centsToDollars(loan.initial_amount_cents):""}" placeholder="1200.00" ${hasHistory?"disabled":""}></div></div><div><label class="mb-1.5 block text-xs font-semibold" for="start-date">Date lent *</label><input required type="date" class="field" id="start-date" name="startDate" value="${escapeHTML(loan?.start_date || today())}"></div></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="repayment-type">Repayment type</label><select class="field" id="repayment-type" name="repaymentType" ${hasHistory&&balanceCents(loan)===0?"disabled":""}><option value="flexible" ${!loan||loan.repayment_type==="flexible"?"selected":""}>Flexible (no fixed schedule)</option><option value="one_time" ${loan?.repayment_type==="one_time"?"selected":""}>One-time repayment</option><option value="installment" ${loan?.repayment_type==="installment"?"selected":""}>Fixed monthly installments</option></select></div>
+        <div id="plan-fields" class="${loan?.repayment_type==="installment"?"":"hidden"}"><div class="grid grid-cols-2 gap-3"><div><label class="mb-1.5 block text-xs font-semibold" for="installment-amount">Monthly payment *</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">$</span><input min="0.01" step="0.01" type="number" class="field !pl-7" id="installment-amount" name="installmentAmount" value="${loan?.installment_amount_cents?centsToDollars(loan.installment_amount_cents):""}" ${hasHistory&&balanceCents(loan)===0?"disabled":""}></div></div><div><label class="mb-1.5 block text-xs font-semibold" for="installment-count">Number of months *</label><input min="1" max="600" step="1" type="number" class="field" id="installment-count" name="installmentCount" value="${loan?.installment_count || ""}" placeholder="6" ${hasHistory&&balanceCents(loan)===0?"disabled":""}></div></div><label class="mb-1.5 mt-3 block text-xs font-semibold" for="first-due">First payment due *</label><input type="date" class="field" id="first-due" name="firstDueDate" value="${escapeHTML(loan?.first_due_date || "")}" ${hasHistory&&balanceCents(loan)===0?"disabled":""}><p class="mt-1 text-[11px] leading-5 muted">The last payment adjusts to match the scheduled balance exactly. No interest or fees are added.</p></div>
+        <div id="due-date-fields" class="${!loan||loan.repayment_type!=="installment"?"":"hidden"}"><label class="mb-1.5 block text-xs font-semibold" for="due-date">Target due date <span class="font-normal muted">(optional)</span></label><input type="date" class="field" id="due-date" name="targetDueDate" value="${escapeHTML(loan?.target_due_date || "")}" ${hasHistory&&balanceCents(loan)===0?"disabled":""}></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="reason">Purpose <span class="font-normal muted">(optional)</span></label><input maxlength="500" class="field" id="reason" name="reason" value="${escapeHTML(loan?.reason || "")}" placeholder="e.g. Car repair"></div>
+        ${hasHistory&&balanceCents(loan)>0?'<label class="flex items-start gap-2 rounded-xl bg-amber-500/10 p-3 text-xs leading-5 text-amber-800 dark:text-amber-200"><input type="checkbox" name="planAgreement" class="mt-1 accent-amber-600"><span>I confirm the borrower and I agreed to this revised plan. This is the lender’s record of agreement, not an electronic signature from the borrower. The previous plan remains in the change history.</span></label>':hasHistory?'<p class="rounded-xl bg-slate-500/[.05] p-3 text-xs leading-5 muted">The principal is fully settled. You can update borrower details, but the repayment plan is locked.</p>':""}
+        <div class="flex justify-end gap-2 pt-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">${edit?"Save changes":"Create loan"}</button></div></form>`);
+      $("#repayment-type")?.addEventListener("change", event => {
+        $("#plan-fields").classList.toggle("hidden", event.target.value!=="installment");
+        $("#due-date-fields").classList.toggle("hidden", event.target.value==="installment");
+        $("#installment-amount").required = event.target.value==="installment";
+        $("#installment-count").required = event.target.value==="installment";
+        $("#first-due").required = event.target.value==="installment";
+      });
+      $("#repayment-type")?.dispatchEvent(new Event("change"));
+    }
+    function paymentForm(loan) {
+      openModal("Record a payment", `<div class="mb-4 rounded-xl bg-emerald-500/[.07] p-3"><p class="text-sm font-bold">${escapeHTML(loan.borrower_name)}</p><p class="mt-1 text-xs muted">Remaining balance: <strong class="text-[var(--text)]">${money(balanceCents(loan))}</strong></p></div><form id="payment-form" data-id="${loan.id}" class="space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="payment-amount">Amount received *</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">$</span><input required type="number" min="0.01" step="0.01" max="${centsToDollars(balanceCents(loan))}" id="payment-amount" name="amount" class="field !pl-7" placeholder="0.00"></div><p class="mt-1 text-[11px] muted">Partial payments are allowed. For installment loans, payments go to the oldest unpaid installment first.</p></div><div><label class="mb-1.5 block text-xs font-semibold" for="payment-date">Payment date</label><input type="date" id="payment-date" name="date" class="field" value="${today()}"></div><div><label class="mb-1.5 block text-xs font-semibold" for="payment-note">Note <span class="font-normal muted">(optional)</span></label><input maxlength="300" id="payment-note" name="note" class="field" placeholder="e.g. Venmo"></div><div class="flex justify-end gap-2 pt-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Save payment</button></div></form>`);
+    }
+    function forgivenessForm(loan) {
+      openModal("Forgive part of the balance", `<p class="mb-4 text-sm leading-6 muted">Forgiveness is recorded as a separate adjustment, not as a payment. Remaining balance: <strong>${money(balanceCents(loan))}</strong>.</p><form id="forgive-form" data-id="${loan.id}" class="space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="forgive-amount">Amount forgiven *</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">$</span><input required type="number" min="0.01" step="0.01" max="${centsToDollars(balanceCents(loan))}" id="forgive-amount" name="amount" class="field !pl-7"></div></div><div><label class="mb-1.5 block text-xs font-semibold" for="forgive-note">Reason or note</label><input maxlength="300" id="forgive-note" name="note" class="field"></div><div class="flex justify-end gap-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Record forgiveness</button></div></form>`);
+    }
+    function historyModal(loan) {
+      const schedule=(loan.installments||[]).filter(i=>i.is_current);
+      const payments=loan.payments||[];
+      const adjustments=loan.adjustments||[];
+      openModal("Loan details & history",`<div class="mb-4 grid grid-cols-2 gap-3 rounded-xl bg-slate-500/[.04] p-3"><div><p class="text-[11px] muted">Plan</p><p class="mt-1 text-sm font-semibold">${escapeHTML(planLabel(loan))}</p></div><div class="text-right"><p class="text-[11px] muted">Remaining</p><p class="mt-1 text-sm font-extrabold">${money(balanceCents(loan))}</p></div></div>${schedule.length?`<h3 class="mb-2 text-sm font-bold">Current repayment schedule</h3><div class="mb-5 divide-y divide-[var(--line)]">${schedule.map(i=>`<div class="flex items-center justify-between gap-2 py-2 text-xs"><span>Payment ${i.installment_number} · ${dateLabel(i.due_date)}</span><span class="text-right"><strong class="block">${money(i.paid_cents)} paid</strong>${Number(i.forgiven_cents)>0?`<span class="text-indigo-500">${money(i.forgiven_cents)} forgiven · </span>`:""}<span class="muted">of ${money(i.amount_due_cents)}</span></span></div>`).join("")}</div>`:""}${loan.planHistory?.length?`<h3 class="mb-2 text-sm font-bold">Plan change history</h3><div class="mb-5 divide-y divide-[var(--line)]">      ${loan.planHistory.map(change=>`<div class="py-2 text-xs"><p class="font-semibold">Plan revised ${dateLabel(change.changed_at.slice(0,10))}${change.borrower_agreement_attested?" · lender attested":" · before recorded payments"}</p><p class="mt-1 muted">Previous: ${escapeHTML(change.previous_plan.repayment_type)} · remaining then ${money(change.previous_plan.remaining_cents)}</p><p class="muted">New: ${escapeHTML(change.new_plan.repayment_type)} · scheduled ${money(change.new_plan.remaining_cents)}</p></div>`).join("")}</div>`:""}<h3 class="mb-2 text-sm font-bold">Payments (${payments.length})</h3>${payments.length?`<div class="mb-5 divide-y divide-[var(--line)]">${payments.map(p=>`<div class="flex items-center justify-between gap-2 py-2"><div><p class="text-sm font-semibold">${escapeHTML(p.note||"Payment received")}</p><p class="text-xs muted">${dateLabel(p.payment_date)}</p></div><p class="font-bold text-emerald-600">${money(p.amount_cents)}</p></div>`).join("")}</div>`:'<p class="mb-5 text-sm muted">No payments recorded.</p>'}${adjustments.length?`<h3 class="mb-2 text-sm font-bold">Balance adjustments</h3><div class="divide-y divide-[var(--line)]">${adjustments.map(a=>`<div class="flex items-center justify-between gap-2 py-2"><div><p class="text-sm font-semibold">${escapeHTML(a.note||"Forgiveness")}</p><p class="text-xs muted">${dateLabel(a.adjustment_date)}</p></div><p class="font-bold text-indigo-500">−${money(a.amount_cents)}</p></div>`).join("")}</div>`:""}`);
+    }
+    function settingsForm() {
+      openModal("Payment & account settings", `<p class="mb-4 text-sm leading-6 muted">Payment details appear in the reminders and statement links you choose to share.</p><form id="settings-form" class="space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="venmo">Venmo username</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">@</span><input class="field !pl-8" id="venmo" name="venmo" value="${escapeHTML(settings.venmo)}" placeholder="username"></div></div><div><label class="mb-1.5 block text-xs font-semibold" for="cashapp">Cash App cashtag</label><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 muted">$</span><input class="field !pl-8" id="cashapp" name="cashapp" value="${escapeHTML(settings.cashapp)}" placeholder="cashtag"></div></div><div><label class="mb-1.5 block text-xs font-semibold" for="zelle">Zelle details</label><input class="field" id="zelle" name="zelle" value="${escapeHTML(settings.zelle)}" placeholder="Phone or email"></div><div class="flex items-center justify-between rounded-xl border border-[var(--line)] p-3"><div><p class="text-sm font-semibold">Appearance</p><p class="text-xs muted">Theme follows this account</p></div><button type="button" class="btn btn-soft !py-2 text-xs" data-action="theme"><i data-lucide="${dark?"sun":"moon"}" class="h-4 w-4"></i>${dark?"Light":"Dark"} mode</button></div><div class="flex flex-wrap gap-2 border-t border-[var(--line)] pt-4"><button type="button" class="btn btn-soft text-xs" data-action="shares"><i data-lucide="link" class="h-4 w-4"></i>Manage statement links</button><button type="button" class="btn btn-soft text-xs" data-action="export-json"><i data-lucide="download" class="h-4 w-4"></i>Export data</button></div><div class="flex justify-end gap-2 pt-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Save settings</button></div></form><div class="mt-5 border-t border-[var(--line)] pt-4"><button class="btn btn-danger text-sm" data-action="delete-account"><i data-lucide="user-round-x" class="h-4 w-4"></i>Delete account</button><p class="mt-2 text-[11px] leading-5 muted">Permanent deletion removes this account and its cloud records. A previous local-only copy remains on this browser until you remove it.</p></div>`);
+    }
+
+    function paymentLinks() {
+      const venmo = settings.venmo.trim().replace(/^@/,"");
+      const cash = settings.cashapp.trim().replace(/^\$/,"");
+      return [
+        venmo ? `Venmo: https://venmo.com/${encodeURIComponent(venmo)}` : "",
+        cash ? `Cash App: https://cash.app/$${encodeURIComponent(cash)}` : "",
+        settings.zelle.trim() ? `Zelle: ${settings.zelle.trim()}` : ""
+      ].filter(Boolean).join("\n");
+    }
+    function reminderForm(loan) {
+      openModal("Create a payment reminder", `<form id="reminder-form" data-id="${loan.id}" class="space-y-4"><p class="text-sm leading-6 muted">Copy a friendly note and send it yourself. PayMeBack never sends reminders automatically.</p><div class="rounded-xl bg-indigo-500/[.07] p-3"><p class="text-sm font-bold">${escapeHTML(loan.borrower_name)} <span class="font-normal muted">· ${money(balanceCents(loan))} remaining</span></p></div><div><label class="mb-1.5 block text-xs font-semibold" for="reminder-tone">Tone</label><select class="field" id="reminder-tone"><option>Friendly</option><option>Formal</option><option>Humorous</option><option>Direct</option></select></div><div><label class="mb-1.5 block text-xs font-semibold" for="reminder-copy">Message</label><textarea id="reminder-copy" rows="8" class="field resize-y text-sm leading-6"></textarea></div><div class="flex justify-between gap-2"><button type="button" class="btn btn-soft" data-action="regenerate-reminder">Regenerate</button><button type="button" class="btn btn-primary" data-action="copy-reminder"><i data-lucide="copy" class="h-4 w-4"></i>Copy</button></div></form>`);
+      const form = $("#reminder-form");
+      form.dataset.name = loan.borrower_name;
+      form.dataset.balance = String(balanceCents(loan));
+      form.dataset.reason = loan.reason || "";
+      form.dataset.due = nextInstallment(loan)?.due_date || loan.target_due_date || "";
+      updateReminder();
+    }
+    function updateReminder() {
+      const form = $("#reminder-form"); if (!form) return;
+      const name = form.dataset.name || "there";
+      const amount = money(Number(form.dataset.balance || 0));
+      const due = form.dataset.due ? ` The next due date is ${dateLabel(form.dataset.due)}.` : "";
+      const purpose = form.dataset.reason ? ` for ${form.dataset.reason}` : "";
+      const tone = $("#reminder-tone").value;
+      const copy = {
+        Friendly:`Hi ${name}! Hope things are going well. Just a friendly reminder about the${purpose} loan—there’s ${amount} left.${due}`,
+        Formal:`Hello ${name}, this is a courteous reminder that ${amount} remains outstanding on the personal loan${purpose}.${due}`,
+        Humorous:`Hey ${name}! My wallet asked me to check in: ${amount} from our loan is still out exploring.${due}`,
+        Direct:`Hi ${name}, your remaining loan balance is ${amount}.${due} Please let me know when you expect to repay it.`
+      }[tone] || "";
+      const links = paymentLinks();
+      $("#reminder-copy").value = `${copy}${links?`\n\nPayment options:\n${links}`:""}\n\nThis is an informal personal loan tracking summary provided for record-keeping purposes.`;
+    }
+
+    async function sha256(text) {
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+      return [...new Uint8Array(hash)].map(byte=>byte.toString(16).padStart(2,"0")).join("");
+    }
+    function randomToken() {
+      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      let binary = "";
+      bytes.forEach(byte => binary += String.fromCharCode(byte));
+      return btoa(binary).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+    }
+    async function createShareLink(loanId, expiry) {
+      if (!user || location.protocol === "file:") throw new Error("Share links need the published HTTPS app address.");
+      const token = randomToken();
+      const tokenHash = await sha256(token);
+      const expiresAt = expiry ? new Date(Date.now() + Number(expiry) * 86400000).toISOString() : null;
+      const { error } = await supabase.from("share_links").insert({ loan_id:loanId, owner_id:user.id, token_hash:tokenHash, expires_at:expiresAt });
+      if (error) throw error;
+      const url = new URL(location.href);
+      url.hash = `share=${token}`;
+      return url.toString();
+    }
+    async function shareForm(loan) {
+      const { data, error } = await supabase.from("share_links").select("id,created_at,expires_at,revoked_at").eq("loan_id",loan.id).order("created_at",{ascending:false});
+      if (error) { toast(error.message,true); return; }
+      openModal("Borrower statement links", `<p class="mb-4 text-sm leading-6 muted">Anyone with a link can view this loan’s statement. The link contains no loan details and can be revoked at any time.</p><div class="mb-4 flex gap-2"><select id="share-expiry" class="field"><option value="7">Expires in 7 days</option><option value="30" selected>Expires in 30 days</option><option value="90">Expires in 90 days</option><option value="">Never expires</option></select><button class="btn btn-primary" data-action="create-share" data-id="${loan.id}"><i data-lucide="link" class="h-4 w-4"></i>Create link</button></div><h3 class="mb-2 text-sm font-bold">Existing links</h3><div class="max-h-56 space-y-2 overflow-auto">${data?.length?data.map(link=>`<div class="flex items-center justify-between gap-3 rounded-xl border border-[var(--line)] p-3"><div><p class="text-xs font-semibold">${link.revoked_at?"Revoked":link.expires_at&&new Date(link.expires_at)<new Date()?"Expired":"Active"}</p><p class="mt-1 text-[10px] muted">Created ${dateLabel(link.created_at.slice(0,10))}${link.expires_at?` · expires ${dateLabel(link.expires_at.slice(0,10))}`:" · no expiry"}</p></div>${!link.revoked_at&&(!link.expires_at||new Date(link.expires_at)>new Date())?`<button class="btn btn-soft !px-2 !py-1.5 text-xs text-rose-600" data-action="revoke-share" data-share-id="${link.id}">Revoke</button>`:""}</div>`).join(""):'<p class="rounded-xl bg-slate-500/[.04] p-4 text-sm muted">No statement links yet.</p>'}</div>`);
+      $("#modal-root .modal-panel").dataset.loanId = loan.id;
+    }
+    async function manageAllShares() {
+      const {data,error}=await supabase.from("share_links").select("id,loan_id,created_at,expires_at,revoked_at").order("created_at",{ascending:false});
+      if(error){toast(error.message,true);return;}
+      openModal("Manage statement links",`<p class="mb-4 text-sm leading-6 muted">Revoke links you no longer want to work. Anyone who already opened a statement may have saved a copy.</p><div class="max-h-[60vh] space-y-2 overflow-auto">${data?.length?data.map(link=>{const loan=loans.find(item=>item.id===link.loan_id);return `<div class="flex items-center justify-between gap-3 rounded-xl border border-[var(--line)] p-3"><div class="min-w-0"><p class="truncate text-xs font-semibold">${escapeHTML(loan?.borrower_name||"Deleted loan")} · ${link.revoked_at?"Revoked":link.expires_at&&new Date(link.expires_at)<new Date()?"Expired":"Active"}</p><p class="mt-1 text-[10px] muted">Created ${dateLabel(link.created_at.slice(0,10))}${link.expires_at?` · expires ${dateLabel(link.expires_at.slice(0,10))}`:" · no expiry"}</p></div>${!link.revoked_at&&(!link.expires_at||new Date(link.expires_at)>new Date())?`<button class="btn btn-soft !px-2 !py-1.5 text-xs text-rose-600" data-action="revoke-share" data-share-id="${link.id}">Revoke</button>`:""}</div>`}).join(""):'<p class="rounded-xl bg-slate-500/[.04] p-4 text-sm muted">No statement links yet.</p>'}</div>`);
+    }
+    async function renderSharedStatement(token) {
+      currentView = "share";
+      $("#app").innerHTML = `<div class="grid min-h-screen place-items-center"><div class="text-center"><div class="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent"></div><p class="text-sm muted">Loading shared statement…</p></div></div>`;
+      const { data, error } = await supabase.rpc("get_shared_statement", { p_token:token });
+      if (error) throw error;
+      if (!data || typeof data.borrowerName !== "string" || !Number.isSafeInteger(Number(data.initialAmountCents)) || Number(data.initialAmountCents)<0 || !Array.isArray(data.payments) || !Array.isArray(data.adjustments) || !Array.isArray(data.installments)) { renderShareError("This statement link is invalid, expired, or has been revoked."); return; }
+      const totalPaid = (data.payments || []).reduce((sum,p)=>sum+Number(p.amountCents||0),0);
+      const forgiven = (data.adjustments || []).reduce((sum,a)=>sum+Number(a.amountCents||0),0);
+      const remaining = Math.max(0,Number(data.initialAmountCents||0)-totalPaid-forgiven);
+      const options = data.paymentOptions || {};
+      const venmo = String(options.venmo||"").trim().replace(/^@/,"");
+      const cash = String(options.cashapp||"").trim().replace(/^\$/,"");
+      const actions = `${venmo?`<a class="btn btn-soft flex-1" target="_blank" rel="noopener noreferrer" href="https://venmo.com/${encodeURIComponent(venmo)}"><i data-lucide="send" class="h-4 w-4 text-sky-500"></i>Pay via Venmo</a>`:""}${cash?`<a class="btn btn-soft flex-1" target="_blank" rel="noopener noreferrer" href="https://cash.app/$${encodeURIComponent(cash)}"><i data-lucide="circle-dollar-sign" class="h-4 w-4 text-emerald-500"></i>Pay via Cash App</a>`:""}`;
+      const schedule = data.installments || [];
+      $("#app").innerHTML = `<div class="mx-auto min-h-screen max-w-2xl px-4 py-8 sm:px-8 sm:py-12"><header class="mb-8 flex items-center justify-between">${brand()}<a href="#" class="btn btn-soft !px-3 text-xs"><i data-lucide="x" class="h-4 w-4"></i>Close statement</a></header><section class="surface card overflow-hidden"><div class="bg-gradient-to-br from-indigo-600 to-violet-600 px-6 py-8 text-white sm:px-9 sm:py-10"><p class="mb-3 text-xs font-bold uppercase tracking-[.15em] text-indigo-100">Personal loan statement</p><h1 class="text-2xl font-extrabold sm:text-3xl">Hi, ${escapeHTML(data.borrowerName)}</h1><p class="mt-2 max-w-md text-sm leading-6 text-indigo-100">A clear summary of your loan${data.reason?` for ${escapeHTML(data.reason)}`:""}.</p></div><div class="grid grid-cols-2 gap-4 border-b border-[var(--line)] px-6 py-6 sm:px-9"><div><p class="text-xs muted">Original amount</p><p class="mt-1 text-xl font-bold">${money(data.initialAmountCents)}</p></div><div><p class="text-xs muted">Remaining balance</p><p class="mt-1 text-xl font-extrabold text-indigo-500">${money(remaining)}</p></div><div><p class="text-xs muted">Paid so far</p><p class="mt-1 font-bold text-emerald-600">${money(totalPaid)}</p></div><div><p class="text-xs muted">Loan date</p><p class="mt-1 font-semibold">${dateLabel(data.startDate)}</p></div></div><div class="px-6 py-6 sm:px-9"><div class="mb-4 flex items-center justify-between"><h2 class="font-bold">Repayment plan</h2></div><p class="mb-3 rounded-xl bg-slate-500/[.04] p-3 text-sm font-semibold">${escapeHTML(data.repaymentType==="installment"?`${money(data.installmentAmountCents)} monthly · ${data.installmentCount} planned installments`:data.repaymentType==="one_time"?"One-time repayment":"Flexible repayment")}</p>${schedule.length?`<div class="mb-6 divide-y divide-[var(--line)]">${schedule.map(i=>`<div class="flex items-center justify-between gap-3 py-2 text-xs"><span>Installment ${i.number} · ${dateLabel(i.dueDate)}</span><span class="text-right"><strong class="block">${money(i.paidCents)} paid</strong>${Number(i.forgivenCents)>0?`<span class="text-indigo-500">${money(i.forgivenCents)} forgiven · </span>`:""}<span class="muted">of ${money(i.amountCents)}</span></span></div>`).join("")}</div>`:""}<div class="mb-3 flex items-center justify-between"><h2 class="font-bold">Payment history</h2><span class="rounded-full bg-slate-500/10 px-2.5 py-1 text-[10px] font-bold muted">${(data.payments||[]).length} ${(data.payments||[]).length===1?"payment":"payments"}</span></div>${data.payments?.length?`<div class="divide-y divide-[var(--line)]">${data.payments.map(p=>`<div class="flex items-center justify-between gap-3 py-3"><div><p class="text-sm font-semibold">${escapeHTML(p.note||"Payment received")}</p><p class="mt-0.5 text-xs muted">${dateLabel(p.date)}</p></div><p class="font-bold text-emerald-600">−${money(p.amountCents)}</p></div>`).join("")}</div>`:'<p class="rounded-xl bg-slate-500/[.05] px-4 py-5 text-center text-sm muted">No payments have been recorded yet.</p>'}${data.adjustments?.length?`<h3 class="mb-2 mt-5 text-sm font-bold">Balance adjustments</h3>${data.adjustments.map(a=>`<div class="flex justify-between gap-2 py-2 text-xs"><span>${escapeHTML(a.note||"Balance forgiveness")} · ${dateLabel(a.date)}</span><span class="font-semibold text-indigo-500">−${money(a.amountCents)}</span></div>`).join("")}`:""}</div><div class="border-t border-[var(--line)] bg-slate-500/[.025] px-6 py-6 sm:px-9"><h2 class="mb-3 font-bold">Payment options</h2>${actions?`<div class="flex flex-col gap-2 sm:flex-row">${actions}</div>`:""}${options.zelle?`<div class="mt-3 rounded-xl border border-[var(--line)] p-3"><p class="text-[11px] font-semibold muted">Zelle</p><p class="mt-1 break-all text-sm font-semibold">${escapeHTML(options.zelle)}</p></div>`:""}${!actions&&!options.zelle?'<p class="text-sm muted">Please contact the lender for payment details.</p>':""}</div><p class="px-6 py-4 text-center text-[11px] leading-5 muted sm:px-9">This is an informal personal loan tracking summary provided for record-keeping purposes. This read-only statement was shared by the lender.</p></section><p class="mt-5 text-center text-xs muted">Powered by PayMeBack · Private by design</p></div>`;
+      window.lucide?.createIcons();
+    }
+    function renderShareError(message) {
+      currentView = "share";
+      $("#app").innerHTML = `<div class="mx-auto flex min-h-screen max-w-xl items-center px-5"><section class="surface card w-full p-7 text-center"><div class="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-rose-500/10 text-rose-500"><i data-lucide="link-2-off" class="h-6 w-6"></i></div><h1 class="text-xl font-extrabold">Statement unavailable</h1><p class="mt-2 text-sm leading-6 muted">${escapeHTML(message)}</p><p class="mt-3 text-xs muted">Ask the sender for a current link if you think this is a mistake.</p></section></div>`;
+      window.lucide?.createIcons();
+    }
+
+    function renderPolicy(which) {
+      currentView = "policy";
+      const isTerms = which === "terms";
+      const title = isTerms ? "Terms of Service" : "Privacy Policy";
+      const body = isTerms ? `<p class="rounded-xl border border-amber-300 bg-amber-500/[.08] p-3 text-sm text-amber-800 dark:text-amber-200"><strong>Draft for review.</strong> Replace all bracketed placeholders and obtain qualified legal review before accepting users.</p>
+        <h2>1. Who operates PayMeBack</h2><p>PayMeBack is operated by [BUSINESS / OWNER NAME], located at [BUSINESS ADDRESS OR REGION]. Contact: [SUPPORT EMAIL]. These terms apply when you use the service.</p>
+        <h2>2. What the service does</h2><p>PayMeBack helps users privately record informal personal loans, repayment plans, payments, and balance adjustments, and optionally share a read-only statement with a borrower. PayMeBack does not transfer funds, collect debt, set lending terms, report credit, act as a bank, or provide financial, tax, or legal advice.</p>
+        <h2>3. Your responsibilities</h2><ul><li>Provide accurate information and keep your account credentials secure.</li><li>Use the service lawfully and obtain any required consent before sharing personal information or contacting another person.</li><li>Review records, calculations, payment history, and statements for accuracy. A displayed record is not proof that a payment occurred or that a debt is legally enforceable.</li><li>Do not use the service for harassment, unlawful lending, threats, or unauthorized access.</li></ul>
+        <h2>4. Accounts and email</h2><p>Account access requires email verification through our authentication provider. You may request password reset or account deletion. You are responsible for access to the email account used for sign-in.</p>
+        <h2>5. Shared statements</h2><p>Sharing is optional. Anyone with a valid statement link can view the specific information disclosed by that link until it expires or you revoke it. Treat a link like a private document. Do not share information you do not intend the recipient to see.</p>
+        <h2>6. Data, availability, and changes</h2><p>Service availability depends on third-party hosting and authentication providers. We may update or discontinue features and will provide notice where required. No service can guarantee uninterrupted availability or that a user will preserve independent backups.</p>
+        <h2>7. Disclaimers and limits</h2><p>To the extent allowed by applicable law, the service is provided “as is” without a promise that it creates a legal agreement, verifies payments, or is suitable for a particular purpose. Nothing here limits rights that cannot legally be limited. [COUNSEL TO REVIEW LIABILITY, WARRANTY, DISPUTE, AND GOVERNING-LAW TERMS.]</p>
+        <h2>8. Contact and effective date</h2><p>Effective date: [DATE]. Questions: [SUPPORT EMAIL]. Applicable regions and dispute terms must be completed after legal review.</p>` :
+        `<p class="rounded-xl border border-amber-300 bg-amber-500/[.08] p-3 text-sm text-amber-800 dark:text-amber-200"><strong>Draft for review.</strong> This template describes intended behavior. Replace bracketed placeholders, verify actual provider settings, and obtain qualified legal review before launch.</p>
+        <h2>1. Controller and contact</h2><p>[BUSINESS / OWNER NAME] at [BUSINESS ADDRESS OR REGION] is responsible for the personal information described here. Privacy contact: [PRIVACY / SUPPORT EMAIL]. This policy applies in [LAUNCH COUNTRIES / REGIONS] from [EFFECTIVE DATE].</p>
+        <h2>2. Information we process</h2><p>When you use PayMeBack, we process your email address and authentication state; borrower names and optional contact details; loan amounts, purposes, repayment schedules, payment entries, notes, adjustments, payment handles, account preferences, and statement-link metadata. We also receive limited technical data needed for security, delivery, and troubleshooting. Do not enter sensitive information that is not needed to track a loan.</p>
+        <h2>3. Why we use it</h2><ul><li>Authenticate you and protect access to your account.</li><li>Store and display loan records, repayment schedules, payments, and settings.</li><li>Create a statement only when you request a share link, and allow you to revoke or expire it.</li><li>Provide backup/export, account deletion, security, and support.</li></ul>
+        <h2>4. Vendors and sharing</h2><p>Supabase is used for authentication, database hosting, and server-side functions, subject to the project’s actual region, configuration, and vendor terms. The page also loads frontend libraries from Tailwind’s CDN, unpkg (Lucide icons), and jsDelivr (Supabase JavaScript client); those providers may receive technical request information such as your IP address when the page loads. [CONFIRM PROVIDER TERMS, HOSTING, EMAIL, ANALYTICS, AND SUPPORT DETAILS BEFORE LAUNCH.] We do not sell personal information. A statement recipient can view data the owner elects to share through a bearer link. We may disclose information when legally required or to protect service security, subject to applicable law.</p>
+        <h2>5. Storage and security</h2><p>Account records are stored in the configured Supabase project, not solely in this browser. Database row-level security is intended to restrict records to their owner; public statement access is limited to a random revocable token. No internet service can promise absolute security. [DOCUMENT DATA REGION, ENCRYPTION, ACCESS REVIEW, BACKUP, AND INCIDENT PRACTICES AFTER VERIFYING CONFIGURATION.]</p>
+        <h2>6. Retention, export, and deletion</h2><p>Records are retained while your account is active and for [RETENTION PERIOD / LEGAL REQUIREMENT] after deletion where applicable. You can export records from the app and request account deletion; deletion removes the account and associated cloud data, subject to backups and lawful retention. Copies you previously downloaded or shared, and old browser-local backups, are not removed automatically.</p>
+        <h2>7. Choices and rights</h2><p>Depending on where you live, you may have rights to access, correct, export, restrict, or delete personal information. Contact [PRIVACY EMAIL] to make a request. We will verify requests as required by law. Borrowers who receive a statement should contact its sender about the underlying loan record.</p>
+        <h2>8. Children and updates</h2><p>PayMeBack is not designed for children under [MINIMUM AGE]. We may update this policy and will provide notice when required. Contact [PRIVACY / SUPPORT EMAIL] with questions or complaints.</p>`;
+      $("#app").innerHTML = `<div class="mx-auto min-h-screen max-w-3xl px-4 py-7 sm:px-8"><header class="mb-7 flex items-center justify-between">${brand()}<a class="btn btn-soft !px-3 text-xs" href="#">Back to app</a></header><article class="surface card p-5 sm:p-8"><p class="text-xs font-bold uppercase tracking-wider text-indigo-500">PayMeBack · Draft legal page</p><h1 class="mt-2 text-3xl font-extrabold">${title}</h1><p class="mt-2 text-xs muted">Last updated: [DATE]</p><div class="legal-copy mt-6">${body}</div></article><footer class="py-5 text-center text-xs muted"><a href="#terms" class="text-indigo-500 hover:underline">Terms</a> · <a href="#privacy" class="text-indigo-500 hover:underline">Privacy</a></footer></div>`;
+      window.lucide?.createIcons();
+    }
+
+    function openLoanActions(id) {
+      const loan = loans.find(item => item.id === id); if (!loan) return;
+      openModal("Loan actions", `<div class="space-y-2"><button class="btn btn-soft w-full justify-start" data-action="edit" data-id="${loan.id}"><i data-lucide="pencil" class="h-4 w-4"></i>Edit loan</button>${balanceCents(loan)>0?`<button class="btn btn-soft w-full justify-start" data-action="forgive" data-id="${loan.id}"><i data-lucide="heart-handshake" class="h-4 w-4"></i>Forgive part of balance</button>`:""}${loan.status==="archived"?`<button class="btn btn-soft w-full justify-start" data-action="restore" data-id="${loan.id}"><i data-lucide="archive-restore" class="h-4 w-4"></i>Restore loan</button>`:`<button class="btn btn-soft w-full justify-start text-amber-600" data-action="archive" data-id="${loan.id}"><i data-lucide="archive" class="h-4 w-4"></i>Archive loan</button>`}<button class="btn btn-soft w-full justify-start text-rose-600" data-action="delete-loan" data-id="${loan.id}"><i data-lucide="trash-2" class="h-4 w-4"></i>Delete loan and history</button></div>`);
+    }
+    async function migrateLegacyData() {
+      const legacy = parseJSON(localStorage.getItem(LOANS_KEY), []);
+      if (!Array.isArray(legacy) || !legacy.length) { localStorage.setItem(MIGRATION_KEY(user.id),"yes"); renderDashboard(); return; }
+      if (!confirm(`Import ${legacy.length} existing loan record${legacy.length===1?"":"s"} into this account? Each record and payment will be imported once. Your browser’s local copy will remain unchanged.`)) return;
+      try {
+        for (const old of legacy) {
+          if (!old || typeof old.borrowerName !== "string" || dollarsToCents(old.initialAmount) <= 0) continue;
+          const payload = {
+            borrower_name:old.borrowerName,
+            borrower_contact:old.borrowerContact || "",
+            start_date:safeDate(old.startDate) || today(),
+            target_due_date:safeDate(old.targetDueDate) || null,
+            initial_amount_cents:dollarsToCents(old.initialAmount),
+            reason:old.reason || "",
+            status:old.status,
+            payments:(Array.isArray(old.payments)?old.payments:[]).map(p=>({date:safeDate(p.date)||today(),amount:Number(p.amount)||0,note:p.note||""}))
+          };
+          const { error } = await supabase.rpc("import_legacy_loan", { p_source_id:String(old.id || newId()), p_payload:payload });
+          if (error) throw error;
+        }
+        const localSettings = parseJSON(localStorage.getItem(SETTINGS_KEY), {});
+        if (!accountHasSettings&&localSettings && (localSettings.venmo||localSettings.cashapp||localSettings.zelle)) {
+          const { error } = await supabase.from("user_settings").upsert({
+            user_id:user.id, venmo:String(localSettings.venmo||"").replace(/^@/,""),
+            cashapp:String(localSettings.cashapp||"").replace(/^\$/,""), zelle:String(localSettings.zelle||""),
+            theme:dark?"dark":"light", updated_at:new Date().toISOString()
+          });
+          if (error) throw error;
+        }
+        localStorage.setItem(MIGRATION_KEY(user.id),"yes");
+        toast("Local records imported. Your original browser copy remains available.");
+        await loadWorkspace();
+      } catch (error) { toast(`Import stopped: ${error.message || "check the data and try again"}`,true); }
+    }
+
+    function exportJSON() {
+      const data = {
+        format:"paymeback-backup", version:2, exportedAt:new Date().toISOString(),
+        settings, loans:loans.map(loan=>({
+          borrowerName:loan.borrower_name, borrowerContact:loan.borrower_contact,
+          startDate:loan.start_date, targetDueDate:loan.target_due_date,
+          initialAmount:Number(loan.initial_amount_cents)/100, reason:loan.reason,
+          repaymentType:loan.repayment_type, installmentAmount:loan.installment_amount_cents?Number(loan.installment_amount_cents)/100:null,
+          installmentCount:loan.installment_count, firstDueDate:loan.first_due_date, status:loan.status,
+          payments:loan.payments.map(p=>({date:p.payment_date,amount:Number(p.amount_cents)/100,note:p.note})),
+          adjustments:loan.adjustments.map(a=>({date:a.adjustment_date,amount:Number(a.amount_cents)/100,note:a.note,kind:a.kind}))
+        }))
+      };
+      download("paymeback-backup.json",JSON.stringify(data,null,2),"application/json");
+    }
+    function csvCell(value) { return `"${String(value??"").replace(/"/g,'""')}"`; }
+    function exportCSV() {
+      const headers=["borrowerName","borrowerContact","startDate","targetDueDate","initialAmount","reason","repaymentType","installmentAmount","installmentCount","firstDueDate","status","payments","adjustments"];
+      const lines=[headers.map(csvCell).join(","),...loans.map(l=>[
+        l.borrower_name,l.borrower_contact,l.start_date,l.target_due_date,Number(l.initial_amount_cents)/100,l.reason,l.repayment_type,
+        l.installment_amount_cents?Number(l.installment_amount_cents)/100:"",l.installment_count,l.first_due_date,l.status,
+        JSON.stringify(l.payments.map(p=>({date:p.payment_date,amount:Number(p.amount_cents)/100,note:p.note}))),
+        JSON.stringify(l.adjustments.map(a=>({date:a.adjustment_date,amount:Number(a.amount_cents)/100,note:a.note,kind:a.kind})))
+      ].map(csvCell).join(","))];
+      download("paymeback-backup.csv",lines.join("\r\n"),"text/csv;charset=utf-8");
+    }
+    function download(name,content,type) {
+      const url=URL.createObjectURL(new Blob([content],{type}));
+      const a=document.createElement("a");a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      toast(`${name} downloaded`);
+    }
+    function parseCSV(text) {
+      const rows=[];let row=[],field="",quoted=false;
+      for(let i=0;i<text.length;i++){const c=text[i];if(quoted&&c==='"'&&text[i+1]==='"'){field+='"';i++;}else if(c==='"')quoted=!quoted;else if(c===","&&!quoted){row.push(field);field="";}else if((c==="\n"||c==="\r")&&!quoted){if(c==="\r"&&text[i+1]==="\n")i++;row.push(field);if(row.some(v=>v!==""))rows.push(row);row=[];field="";}else field+=c;}
+      row.push(field);if(row.some(v=>v!==""))rows.push(row);return rows;
+    }
+    async function importBackup(file) {
+      if (!file) return;
+      try {
+        const text=await file.text();
+        let items, incomingSettings=null;
+        if(file.name.toLowerCase().endsWith(".csv")){
+          const rows=parseCSV(text);if(rows.length<2)throw new Error("The CSV file has no loan records.");
+          const headers=rows[0].map(v=>v.trim());
+          items=rows.slice(1).map(row=>{const record={};headers.forEach((key,i)=>record[key]=row[i]||"");record.payments=parseJSON(record.payments,[]);record.adjustments=parseJSON(record.adjustments,[]);return record;});
+        }else{
+          const data=JSON.parse(text);
+          if(Array.isArray(data))items=data;
+          else if(data&&Array.isArray(data.loans)){items=data.loans;incomingSettings=data.settings||null;}
+          else throw new Error("Choose a PayMeBack JSON or CSV backup.");
+        }
+        if(!items.length)throw new Error("No loan records were found.");
+        if(!confirm(`Add ${items.length} loan${items.length===1?"":"s"} from this backup to your account? Existing loans will not be replaced.`))return;
+        let imported=0;
+        for(const item of items){
+          const principal=dollarsToCents(item.initialAmount);
+          if(!principal||typeof item.borrowerName!=="string")continue;
+          const type=["one_time","flexible","installment"].includes(item.repaymentType)?item.repaymentType:"flexible";
+          const count=type==="installment"?Math.max(1,Math.min(600,Number(item.installmentCount)||1)):null;
+          const installment=dollarsToCents(item.installmentAmount);
+          const planValid=type!=="installment"||(installment>0&&count>0&&installment*(count-1)<principal&&safeDate(item.firstDueDate));
+          const payload={
+            owner_id:user.id,borrower_name:item.borrowerName.trim().slice(0,120),borrower_contact:String(item.borrowerContact||"").slice(0,200),
+            start_date:safeDate(item.startDate)||today(),target_due_date:safeDate(item.targetDueDate)||null,
+            initial_amount_cents:principal,reason:String(item.reason||"").slice(0,500),
+            repayment_type:planValid?type:"flexible",installment_amount_cents:planValid&&type==="installment"?installment:null,
+            installment_count:planValid&&type==="installment"?count:null,first_due_date:planValid&&type==="installment"?item.firstDueDate:null,
+            status:"active"
+          };
+          const {data:created,error}=await supabase.from("loans").insert(payload).select("id").single();
+          if(error)throw error;
+          for(const payment of item.payments||[]){
+            const amount=dollarsToCents(payment.amount);if(!amount)continue;
+            const result=await supabase.rpc("record_loan_payment",{p_loan_id:created.id,p_payment_date:safeDate(payment.date)||today(),p_amount_cents:amount,p_note:String(payment.note||"").slice(0,300)});
+            if(result.error)throw result.error;
+          }
+          for(const adjustment of item.adjustments||[]){
+            const amount=dollarsToCents(adjustment.amount);if(!amount)continue;
+            const result=await supabase.rpc("forgive_loan_balance",{p_loan_id:created.id,p_adjustment_date:safeDate(adjustment.date)||today(),p_amount_cents:amount,p_note:String(adjustment.note||"").slice(0,300)});
+            if(result.error)throw result.error;
+          }
+          if(item.status==="archived"){const result=await supabase.from("loans").update({status:"archived"}).eq("id",created.id);if(result.error)throw result.error;}
+          imported++;
+        }
+        if(incomingSettings&&confirm("This backup contains payment handles and theme settings. Import those settings too?")){
+          const res=await supabase.from("user_settings").upsert({user_id:user.id,venmo:String(incomingSettings.venmo||""),cashapp:String(incomingSettings.cashapp||""),zelle:String(incomingSettings.zelle||""),theme:incomingSettings.theme==="dark"?"dark":"light",updated_at:new Date().toISOString()});
+          if(res.error)throw res.error;
+        }
+        await loadWorkspace();
+        toast(`${imported} loan${imported===1?"":"s"} imported.`);
+      }catch(error){toast(error?.message||"Could not import this backup.",true);}
+      finally{$("#import-file").value="";}
+    }
+
+    async function saveLoan(form) {
+      const fd=new FormData(form);
+      const existing=loans.find(l=>l.id===form.dataset.id);
+      const principal=dollarsToCents(fd.get("principal") ?? (existing?centsToDollars(existing.initial_amount_cents):""));
+      if(!principal)throw new Error("Enter a valid loan amount greater than zero.");
+      const repayment=fd.get("repaymentType") || existing?.repayment_type || "flexible";
+      let monthly=null,count=null,firstDue=null;
+      if(repayment==="installment"){
+        monthly=dollarsToCents(fd.get("installmentAmount") ?? (existing?.installment_amount_cents?centsToDollars(existing.installment_amount_cents):""));
+        count=Number(fd.get("installmentCount") ?? existing?.installment_count);
+        firstDue=safeDate(fd.get("firstDueDate") ?? existing?.first_due_date);
+        if(!monthly||!Number.isInteger(count)||count<1||count>600||!firstDue)throw new Error("Enter a monthly amount, 1–600 installments, and the first due date.");
+      }
+      const targetDue=safeDate(fd.get("targetDueDate"))||null;
+      const planChanged=!existing
+        ||principal!==Number(existing.initial_amount_cents)
+        ||repayment!==existing.repayment_type
+        ||(repayment==="installment"&&(monthly!==Number(existing.installment_amount_cents)||count!==Number(existing.installment_count)||firstDue!==existing.first_due_date))
+        ||repayment!=="installment"&&targetDue!==(existing?.target_due_date||null);
+      if(existing&&balanceCents(existing)===0&&planChanged)throw new Error("A fully settled loan’s repayment plan cannot be changed.");
+      if(repayment==="installment"&&planChanged){
+        const scheduleBalance=existing?balanceCents(existing):principal;
+        if(monthly*(count-1)>=scheduleBalance)throw new Error("The monthly payment is too large for the outstanding balance and number of installments. Reduce it or change the count.");
+      }
+      if(existing&&balanceCents(existing)>0&&(existing.payments.length||existing.adjustments.length)&&planChanged&&!fd.get("planAgreement")){
+        throw new Error("Confirm that the revised schedule has been discussed and agreed with the borrower.");
+      }
+      const payload={
+        owner_id:user.id,borrower_name:String(fd.get("borrowerName")||"").trim().slice(0,120),
+        borrower_contact:String(fd.get("borrowerContact")||"").trim().slice(0,200),
+        start_date:safeDate(fd.get("startDate"))||today(),
+        target_due_date:repayment!=="installment"?targetDue:null,
+        initial_amount_cents:principal,reason:String(fd.get("reason")||"").trim().slice(0,500),
+        repayment_type:repayment,installment_amount_cents:monthly,installment_count:count,first_due_date:firstDue,
+        status:existing?.status==="archived"?"archived":existing&&balanceCents(existing)===0?"paid_in_full":"active"
+      };
+      if(!payload.borrower_name)throw new Error("Borrower name is required.");
+      if(existing){
+        const result=await supabase.rpc("save_loan",{
+          p_loan_id:existing.id,
+          p_borrower_name:payload.borrower_name,
+          p_borrower_contact:payload.borrower_contact,
+          p_start_date:payload.start_date,
+          p_target_due_date:payload.target_due_date,
+          p_initial_amount_cents:payload.initial_amount_cents,
+          p_reason:payload.reason,
+          p_repayment_type:payload.repayment_type,
+          p_installment_amount_cents:payload.installment_amount_cents,
+          p_installment_count:payload.installment_count,
+          p_first_due_date:payload.first_due_date,
+          p_agreement_attested:!!fd.get("planAgreement")
+        });
+        if(result.error)throw result.error;
+      }else{
+        const result=await supabase.from("loans").insert(payload).select("id").single();
+        if(result.error)throw result.error;
+      }
+      closeModal();await loadWorkspace();toast(existing?"Loan updated":"Loan created");
+    }
+    async function savePayment(form) {
+      const amount=dollarsToCents(new FormData(form).get("amount"));
+      const fd=new FormData(form);
+      if(!amount)throw new Error("Enter a payment greater than zero.");
+      const result=await supabase.rpc("record_loan_payment",{
+        p_loan_id:form.dataset.id,p_payment_date:safeDate(fd.get("date"))||today(),
+        p_amount_cents:amount,p_note:String(fd.get("note")||"").trim().slice(0,300)
+      });
+      if(result.error)throw result.error;
+      closeModal();await loadWorkspace();toast("Payment recorded");
+    }
+    async function saveForgiveness(form) {
+      const fd=new FormData(form);const amount=dollarsToCents(fd.get("amount"));
+      if(!amount)throw new Error("Enter an amount greater than zero.");
+      const result=await supabase.rpc("forgive_loan_balance",{
+        p_loan_id:form.dataset.id,p_adjustment_date:today(),p_amount_cents:amount,p_note:String(fd.get("note")||"").trim().slice(0,300)
+      });
+      if(result.error)throw result.error;
+      closeModal();await loadWorkspace();toast("Forgiveness recorded as a balance adjustment");
+    }
+    async function saveSettings(form) {
+      const fd=new FormData(form);
+      const next={venmo:String(fd.get("venmo")||"").trim().replace(/^@/,""),cashapp:String(fd.get("cashapp")||"").trim().replace(/^\$/,""),zelle:String(fd.get("zelle")||"").trim(),theme:dark?"dark":"light"};
+      const result=await supabase.from("user_settings").upsert({user_id:user.id,...next,updated_at:new Date().toISOString()});
+      if(result.error)throw result.error;
+      settings=next;localStorage.setItem(SETTINGS_KEY,JSON.stringify({theme:dark?"dark":"light"}));
+      accountHasSettings=true;
+      closeModal();toast("Settings saved");
+    }
+    async function promptDeleteAccount() {
+      openModal("Permanently delete account", `<p class="mb-4 text-sm leading-6 text-rose-600">This permanently deletes your account and cloud loan records. This cannot be undone. Your previous browser-local backup is not deleted automatically.</p><form id="delete-account-form" class="space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="delete-password">Confirm your password</label><input required type="password" autocomplete="current-password" class="field" id="delete-password" name="password"></div><label class="flex items-start gap-2 text-xs leading-5 muted"><input required type="checkbox" class="mt-1 accent-rose-600"><span>I understand this permanently deletes the cloud account and records.</span></label><div class="flex justify-end gap-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-danger">Delete account</button></div></form>`);
+    }
+    async function deleteAccount(form) {
+      const password=new FormData(form).get("password");
+      const {error:reauthError}=await supabase.auth.signInWithPassword({email:user.email,password});
+      if(reauthError)throw new Error("Password confirmation failed. Check your password and try again.");
+      const {error}=await supabase.functions.invoke("delete-account");
+      if(error)throw error;
+      await supabase.auth.signOut();
+      for(const key of Object.keys(localStorage)) if(key.startsWith("paymeback.migration.v1.")) localStorage.removeItem(key);
+      closeModal();toast("Your account has been deleted.");
+    }
+
+    document.addEventListener("click", async event => {
+      const target=event.target.closest("[data-action],[data-filter]");
+      if(!target)return;
+      const action=target.dataset.action,id=target.dataset.id;
+      if(target.dataset.filter){filter=target.dataset.filter;renderDashboard();window.lucide?.createIcons();return;}
+      if(action==="backdrop"&&event.target===target){closeModal();return;}
+      if(action==="close-modal"){closeModal();return;}
+      if(action==="home"){event.preventDefault();stripHash();if(user)renderDashboard();else renderAuth();return;}
+      if(action==="auth-mode"){authMode=target.dataset.mode;renderAuth();return;}
+      if(action==="resend-verification"){
+        const {error}=await supabase.auth.resend({type:"signup",email:pendingVerificationEmail,options:{emailRedirectTo:`${location.origin}${location.pathname}`}});
+        if(error)toast(error.message,true);else toast("Verification email sent");return;
+      }
+      if(action==="theme"){
+        dark=!dark;settings.theme=dark?"dark":"light";setTheme();
+        if(user){const {error}=await supabase.from("user_settings").upsert({user_id:user.id,...settings,updated_at:new Date().toISOString()});if(error)toast(error.message,true);}
+        if(currentView==="dashboard")renderDashboard();else if($("#modal-root").innerHTML)settingsForm();
+        return;
+      }
+      if(action==="settings"){settingsForm();return;}
+      if(action==="new-loan"){loanForm();return;}
+      if(action==="payment"){const loan=loans.find(l=>l.id===id);if(loan)paymentForm(loan);return;}
+      if(action==="reminder"){const loan=loans.find(l=>l.id===id);if(loan)reminderForm(loan);return;}
+      if(action==="loan-menu"){openLoanActions(id);return;}
+      if(action==="history"){const loan=loans.find(l=>l.id===id);if(loan)historyModal(loan);return;}
+      if(action==="edit"){const loan=loans.find(l=>l.id===id);if(loan)loanForm(loan);return;}
+      if(action==="forgive"){const loan=loans.find(l=>l.id===id);if(loan)forgivenessForm(loan);return;}
+      if(action==="archive"||action==="restore"){
+        const loan=loans.find(l=>l.id===id);if(!loan)return;
+        const status=action==="archive"?"archived":balanceCents(loan)===0?"paid_in_full":"active";
+        const {error}=await supabase.from("loans").update({status,updated_at:new Date().toISOString()}).eq("id",id);
+        if(error)toast(error.message,true);else{closeModal();await loadWorkspace();toast(action==="archive"?"Loan archived":"Loan restored");}
+        return;
+      }
+      if(action==="delete-loan"){
+        const loan=loans.find(l=>l.id===id);if(!loan||!confirm(`Permanently delete ${loan.borrower_name}'s loan and history?`))return;
+        const {error}=await supabase.from("loans").delete().eq("id",id);
+        if(error)toast(error.message,true);else{closeModal();await loadWorkspace();toast("Loan and history deleted");}
+        return;
+      }
+      if(action==="share"){const loan=loans.find(l=>l.id===id);if(loan)await shareForm(loan);return;}
+      if(action==="create-share"){
+        try{const url=await createShareLink(id,$("#share-expiry").value);closeModal();openModal("Statement link created",`<p class="mb-3 text-sm leading-6 muted">Copy and share this private link. Anyone who receives it can view this statement until it expires or you revoke it.</p><textarea readonly class="field min-h-24 break-all text-xs" id="share-url">${escapeHTML(url)}</textarea><div class="mt-3 flex justify-end"><button class="btn btn-primary" data-action="copy-share"><i data-lucide="copy" class="h-4 w-4"></i>Copy link</button></div>`);if(navigator.clipboard?.writeText){try{await navigator.clipboard.writeText(url);toast("Link copied");}catch(_){}}}catch(error){toast(error.message||"Could not create a link.",true);}
+        return;
+      }
+      if(action==="copy-share"){const field=$("#share-url");if(field){field.select();try{await navigator.clipboard.writeText(field.value);toast("Link copied");}catch(_){document.execCommand("copy");toast("Link copied");}}return;}
+      if(action==="shares"){closeModal();await manageAllShares();return;}
+      if(action==="revoke-share"){
+        const loanId=target.closest(".modal-panel")?.dataset.loanId;
+        const {error}=await supabase.from("share_links").update({revoked_at:new Date().toISOString()}).eq("id",target.dataset.shareId);
+        if(error)toast(error.message,true);else{toast("Statement link revoked");if(loanId){const loan=loans.find(l=>l.id===loanId);if(loan)await shareForm(loan);else closeModal();}else await manageAllShares();}
+        return;
+      }
+      if(action==="migrate"){await migrateLegacyData();return;}
+      if(action==="export-json"){exportJSON();return;}
+      if(action==="export-csv"){exportCSV();return;}
+      if(action==="import"){$("#import-file").click();return;}
+      if(action==="signout"){await supabase.auth.signOut();return;}
+      if(action==="retry"){await loadWorkspace().catch(showLoadError);return;}
+      if(action==="delete-account"){promptDeleteAccount();return;}
+      if(action==="regenerate-reminder"){updateReminder();return;}
+      if(action==="copy-reminder"){
+        const text=$("#reminder-copy")?.value||"";
+        try{await navigator.clipboard.writeText(text);toast("Reminder copied");}
+        catch(_){const field=$("#reminder-copy");field?.select();document.execCommand("copy");toast("Reminder copied");}
+      }
+    });
+    document.addEventListener("input",event=>{
+      if(event.target.id==="search"){search=event.target.value;const pos=event.target.selectionStart;renderDashboard();const field=$("#search");field?.focus();field?.setSelectionRange(pos,pos);window.lucide?.createIcons();}
+    });
+    document.addEventListener("change",event=>{
+      if(event.target.id==="sort"){sortBy=event.target.value;renderDashboard();window.lucide?.createIcons();}
+      if(event.target.id==="reminder-tone")updateReminder();
+    });
+    document.addEventListener("submit",async event=>{
+      const form=event.target;if(!(form instanceof HTMLFormElement))return;
+      event.preventDefault();
+      const id=form.getAttribute("id");
+      try{
+        if(id==="config-form"){
+          const fd=new FormData(form);const url=String(fd.get("supabaseUrl")||"").trim().replace(/\/$/,"");
+          const key=String(fd.get("supabaseAnonKey")||"").trim();
+          if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url)||key.length<20)throw new Error("Enter a valid Supabase project URL and public anon/publishable key.");
+          localStorage.setItem(CONFIG_KEY,JSON.stringify({supabaseUrl:url,supabaseAnonKey:key}));
+          window.PAYMEBACK_CONFIG={supabaseUrl:url,supabaseAnonKey:key};await start();return;
+        }
+        if(id==="auth-form"){
+          const fd=new FormData(form);const mode=form.dataset.mode;const email=String(fd.get("email")||"").trim();const password=String(fd.get("password")||"");
+          if(mode==="recover"){
+            const {error}=await supabase.auth.resetPasswordForEmail(email,{redirectTo:`${location.origin}${location.pathname}`});
+            if(error)throw error;authMode="recover";renderAuth("If an account exists for that address, a password-reset email is on its way.");return;
+          }
+          if(mode==="signup"){
+            pendingVerificationEmail=email;
+            const {data,error}=await supabase.auth.signUp({email,password,options:{emailRedirectTo:`${location.origin}${location.pathname}`}});
+            if(error)throw error;
+            if(data.session){pendingVerificationEmail="";session=data.session;user=data.user;await loadWorkspace();}
+            else {authMode="signin";renderAuth("Check your inbox and verify your email before signing in.");}
+            return;
+          }
+          const {data,error}=await supabase.auth.signInWithPassword({email,password});
+          if(error){if(/not confirmed|not verified/i.test(error.message||""))pendingVerificationEmail=email;throw error;}pendingVerificationEmail="";session=data.session;user=data.user;await loadWorkspace();return;
+        }
+        if(id==="password-reset-form"){
+          const password=new FormData(form).get("password");
+          const {error}=await supabase.auth.updateUser({password});
+          if(error)throw error;passwordRecovery=false;authMode="signin";await supabase.auth.signOut();renderAuth("Password updated. Sign in with your new password.");return;
+        }
+        if(id==="loan-form"){await saveLoan(form);return;}
+        if(id==="payment-form"){await savePayment(form);return;}
+        if(id==="forgive-form"){await saveForgiveness(form);return;}
+        if(id==="settings-form"){await saveSettings(form);return;}
+        if(id==="delete-account-form"){await deleteAccount(form);return;}
+      }catch(error){
+        const message=error?.message||"Something went wrong. Please try again.";
+        if(id==="auth-form")renderAuth(`Error: ${message}`);
+        else if(id==="password-reset-form")renderPasswordReset(message);
+        else toast(message,true);
+      }
+    });
+    document.addEventListener("change",event=>{
+      if(event.target.id==="import-file")importBackup(event.target.files?.[0]);
+    });
+    window.addEventListener("hashchange",()=>{
+      if(location.hash==="#terms")renderPolicy("terms");
+      else if(location.hash==="#privacy")renderPolicy("privacy");
+      else if(location.hash===""||location.hash==="#"){if(user)renderDashboard();else if(hasConfig())renderAuth();else renderConfig();}
+      else if(location.hash.startsWith("#share=")){const token=getShareToken();stripHash();if(!token){renderShareError("This statement link is incomplete or no longer supported. Ask the sender to create a new link.");return;}if(hasConfig()){try{if(!supabase)initClient();renderSharedStatement(token).catch(e=>renderShareError(e.message));}catch(e){renderShareError(e.message);}}else renderConfig();}
+    });
+
+    setTheme();
+    start().catch(error=>renderConfig(error?.message||"Application failed to start."));
+  })();
+  </script>
+</body>
+</html>
