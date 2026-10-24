@@ -304,6 +304,50 @@
     function nextInstallment(loan) {
       return (loan.installments || []).find(i => i.is_current && Number(i.paid_cents) + Number(i.forgiven_cents || 0) < Number(i.amount_due_cents));
     }
+    function followUpItems() {
+      const todayDate = today();
+      const lastIncludedDate = new Date(`${todayDate}T00:00:00`);
+      lastIncludedDate.setDate(lastIncludedDate.getDate() + 7);
+      const lastIncluded = `${lastIncludedDate.getFullYear()}-${String(lastIncludedDate.getMonth()+1).padStart(2,"0")}-${String(lastIncludedDate.getDate()).padStart(2,"0")}`;
+      return loans.flatMap(loan => {
+        if (loan.status !== "active" || balanceCents(loan) <= 0) return [];
+        const installments = (loan.installments || [])
+          .filter(item => item.is_current && item.due_date && item.due_date <= lastIncluded)
+          .map(item => ({
+            loan,
+            dueDate:item.due_date,
+            amount:Math.max(0, Number(item.amount_due_cents) - Number(item.paid_cents || 0) - Number(item.forgiven_cents || 0))
+          }))
+          .filter(item => item.amount > 0);
+        if (installments.length || (loan.installments || []).length || !loan.target_due_date || loan.target_due_date > lastIncluded) return installments;
+        return [{ loan, dueDate:loan.target_due_date, amount:balanceCents(loan) }];
+      }).sort((a,b) => a.dueDate.localeCompare(b.dueDate));
+    }
+    function recentActivityItems() {
+      return loans.flatMap(loan => [
+        ...(loan.payments || []).map(payment => ({
+          loan, date:payment.payment_date, label:payment.note || "Payment received",
+          amount:Number(payment.amount_cents || 0), kind:"payment"
+        })),
+        ...(loan.adjustments || []).map(adjustment => ({
+          loan, date:adjustment.adjustment_date, label:adjustment.note || "Balance forgiven",
+          amount:Number(adjustment.amount_cents || 0), kind:"adjustment"
+        }))
+      ]).sort((a,b) => b.date.localeCompare(a.date)).slice(0,5);
+    }
+    function dashboardInsights() {
+      const dueItems = followUpItems();
+      const dueTotal = dueItems.reduce((sum,item) => sum + item.amount, 0);
+      const activity = recentActivityItems();
+      return `<section class="mb-6 grid gap-4 xl:grid-cols-2">
+        <article class="surface card p-4 sm:p-5"><div class="mb-4 flex items-start justify-between gap-3"><div><h2 class="font-bold">Due soon</h2><p class="mt-1 text-xs muted">${dueItems.length?`${money(dueTotal)} scheduled · overdue and next 7 days`:"Overdue and scheduled payments for the next 7 days"}</p></div><span class="grid h-9 w-9 shrink-0 place-items-center rounded-xl ${dueItems.some(item=>item.dueDate<today())?"bg-rose-500/10 text-rose-600":"bg-indigo-500/10 text-indigo-600"}"><i data-lucide="${dueItems.some(item=>item.dueDate<today())?"triangle-alert":"calendar-clock"}" class="h-4 w-4"></i></span></div>
+          ${dueItems.length?`<div class="divide-y divide-[var(--line)]">${dueItems.slice(0,5).map(item=>`<div class="flex items-center justify-between gap-3 py-3"><div class="min-w-0"><p class="truncate text-sm font-semibold">${escapeHTML(item.loan.borrower_name)}</p><p class="mt-0.5 text-xs ${item.dueDate<today()?"font-semibold text-rose-600":"muted"}">${item.dueDate<today()?"Overdue":"Due"} ${dateLabel(item.dueDate)}</p></div><div class="flex shrink-0 items-center gap-2"><span class="text-sm font-bold">${money(item.amount)}</span><button class="btn btn-soft !px-2.5 !py-1.5 text-xs" data-action="payment" data-id="${item.loan.id}" aria-label="Record payment for ${escapeHTML(item.loan.borrower_name)}">Payment</button></div></div>`).join("")}</div>${dueItems.length>5?`<p class="pt-2 text-xs muted">Showing 5 of ${dueItems.length} scheduled payments.</p>`:""}`:'<p class="rounded-xl bg-slate-500/[.04] px-3 py-5 text-center text-sm muted">Nothing is overdue or due in the next 7 days.</p>'}
+        </article>
+        <article class="surface card p-4 sm:p-5"><div class="mb-4 flex items-start justify-between gap-3"><div><h2 class="font-bold">Recent activity</h2><p class="mt-1 text-xs muted">Latest payments and balance adjustments</p></div><span class="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-emerald-500/10 text-emerald-600"><i data-lucide="activity" class="h-4 w-4"></i></span></div>
+          ${activity.length?`<div class="divide-y divide-[var(--line)]">${activity.map(item=>`<button class="flex w-full items-center justify-between gap-3 py-3 text-left" data-action="history" data-id="${item.loan.id}"><span class="min-w-0"><span class="block truncate text-sm font-semibold">${escapeHTML(item.loan.borrower_name)}</span><span class="mt-0.5 block truncate text-xs muted">${escapeHTML(item.label)} · ${dateLabel(item.date)}</span></span><span class="shrink-0 text-sm font-bold ${item.kind==="payment"?"text-emerald-600":"text-indigo-500"}">${item.kind==="payment"?"+":"−"}${money(item.amount)}</span></button>`).join("")}</div>`:'<p class="rounded-xl bg-slate-500/[.04] px-3 py-5 text-center text-sm muted">Payments and adjustments will show here as you record them.</p>'}
+        </article>
+      </section>`;
+    }
     function planLabel(loan) {
       if (loan.repayment_type === "installment") return `${money(loan.installment_amount_cents)} monthly · ${loan.installment_count} payments`;
       if (loan.repayment_type === "one_time") return "One-time repayment";
@@ -331,10 +375,11 @@
       $("#app").innerHTML = `<div class="mx-auto flex min-h-screen max-w-[1440px]">
         <aside class="hidden w-64 shrink-0 flex-col border-r border-[var(--line)] bg-[var(--surface)] px-5 py-7 lg:flex">${brand()}<p class="mb-3 mt-10 px-3 text-[10px] font-bold uppercase tracking-[.18em] muted">Workspace</p><button class="nav-active flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold"><i data-lucide="layout-dashboard" class="h-4 w-4"></i>Overview</button><button class="mt-auto rounded-2xl bg-indigo-500/[.06] p-4 text-left"><span class="mb-2 grid h-8 w-8 place-items-center rounded-lg bg-indigo-500/10 text-indigo-500"><i data-lucide="shield-check" class="h-4 w-4"></i></span><span class="text-sm font-bold">Private by design</span><span class="mt-1 block text-xs leading-5 muted">Your records are protected by your account and database access rules.</span></button></aside>
         <section class="min-w-0 flex-1 px-4 pb-12 pt-5 sm:px-7 lg:px-10 lg:pt-8">
-          <header class="mb-8 flex items-center justify-between gap-3"><div class="lg:hidden">${brand(true)}</div><div class="hidden lg:block"><p class="text-sm muted">${escapeHTML(user.email || "Your personal workspace")}</p></div><div class="ml-auto flex items-center gap-2"><button class="btn btn-soft !px-3" data-action="theme"><i data-lucide="${dark?"sun":"moon"}" class="h-4 w-4"></i><span class="hidden sm:inline">${dark?"Light":"Dark"} mode</span></button><button class="btn btn-soft !px-3" data-action="settings" aria-label="Settings"><i data-lucide="settings-2" class="h-4 w-4"></i></button><button class="btn btn-primary" data-action="new-loan"><i data-lucide="plus" class="h-4 w-4"></i><span class="hidden sm:inline">New loan</span><span class="sm:hidden">Add</span></button></div></header>
+          <header class="mb-8 flex items-center justify-between gap-3"><div class="lg:hidden">${brand(true)}</div><div class="hidden lg:block"><p class="text-sm muted">${escapeHTML(user.email || "Your personal workspace")}</p></div><div class="ml-auto flex items-center gap-2"><button class="btn btn-soft !px-3" data-action="theme"><i data-lucide="${dark?"sun":"moon"}" class="h-4 w-4"></i><span class="hidden sm:inline">${dark?"Light":"Dark"} mode</span></button><button class="btn btn-soft !px-3" data-action="settings" aria-label="Settings"><i data-lucide="settings-2" class="h-4 w-4"></i></button><button class="btn btn-primary" data-action="new-loan"><i data-lucide="plus" class="h-4 w-4"></i><span class="hidden sm:inline">New loan</span><span class="sm:hidden">Add</span></button><button class="btn btn-soft !px-2.5 sm:!px-3" data-action="signout" aria-label="Sign out" title="Sign out"><i data-lucide="log-out" class="h-4 w-4"></i><span class="hidden sm:inline">Sign out</span></button></div></header>
           <div class="mb-7"><p class="mb-2 inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-emerald-600"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Email verified account</p><h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl">Your lending, clearly in view.</h1><p class="mt-2 text-sm muted">Track repayment plans, payments, and friendly follow-ups.</p></div>
           ${!migrationDone && oldLoans.length?`<section class="surface card mb-5 flex flex-col gap-3 border-indigo-200 bg-indigo-500/[.04] p-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 class="font-bold">Import your existing local loans?</h2><p class="mt-1 text-xs leading-5 muted">${oldLoans.length} record${oldLoans.length===1?"":"s"} found on this browser. They will be added to your account; local data will remain untouched.</p></div><button class="btn btn-primary" data-action="migrate"><i data-lucide="database-backup" class="h-4 w-4"></i>Review &amp; import</button></section>`:""}
           <div class="mb-7 grid grid-cols-2 gap-3 xl:grid-cols-4">${metric("hand-coins","Total amount lent",money(lent),"text-indigo-600","bg-indigo-500/10")}${metric("arrow-down-left","Total collected",money(collected),"text-emerald-600","bg-emerald-500/10")}${metric("wallet","Outstanding balance",money(outstanding),"text-amber-600","bg-amber-500/10")}${metric("users-round","Active debtors",active.length,"text-sky-600","bg-sky-500/10")}</div>
+          ${dashboardInsights()}
           <section class="surface card mb-6 flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5"><div><h2 class="font-bold">Your loans</h2><p class="mt-1 text-xs muted">${shown.length} ${shown.length===1?"record":"records"} in this view</p></div><div class="flex flex-col gap-2 sm:flex-row"><label class="relative min-w-0 sm:w-56"><i data-lucide="search" class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 muted"></i><input class="field !py-2 !pl-9 text-sm" id="search" placeholder="Search borrowers or notes…" value="${escapeHTML(search)}"></label><select class="field !w-auto !py-2 text-sm" id="sort"><option value="balance" ${sortBy==="balance"?"selected":""}>Sort: balance</option><option value="due" ${sortBy==="due"?"selected":""}>Sort: due date</option><option value="name" ${sortBy==="name"?"selected":""}>Sort: name</option></select></div></section>
           <div class="mb-4 flex gap-1 overflow-x-auto border-b border-[var(--line)]" role="tablist">${tab("active","Active")}${tab("paid","Paid off")}${tab("all","All loans")}${tab("archived","Archived")}</div>
           <section id="loan-list" class="grid gap-3 xl:grid-cols-2">${shown.length?shown.map(loanCard).join(""):emptyState()}</section>
@@ -816,7 +861,7 @@
       if(action==="export-json"){exportJSON();return;}
       if(action==="export-csv"){exportCSV();return;}
       if(action==="import"){$("#import-file").click();return;}
-      if(action==="signout"){await supabase.auth.signOut();return;}
+      if(action==="signout"){const {error}=await supabase.auth.signOut({scope:"local"});if(error)toast(error.message,true);return;}
       if(action==="retry"){await loadWorkspace().catch(showLoadError);return;}
       if(action==="delete-account"){promptDeleteAccount();return;}
       if(action==="regenerate-reminder"){updateReminder();return;}
