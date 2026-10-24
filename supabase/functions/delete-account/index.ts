@@ -67,6 +67,31 @@ Deno.serve(async (request) => {
   const adminClient = createClient(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false }
   });
+  const { data: documents, error: documentsError } = await adminClient
+    .from("loan_documents")
+    .select("storage_path")
+    .eq("owner_id", user.id);
+  if (documentsError) {
+    return new Response(JSON.stringify({ error: "We could not safely remove your private files. Please try again or contact support." }), {
+      status: 500,
+      headers: { ...jsonHeaders, "access-control-allow-origin": allowedOrigin }
+    });
+  }
+
+  const documentRows = documents ?? [];
+  for (let index = 0; index < documentRows.length; index += 100) {
+    const paths = documentRows.slice(index, index + 100).map((document) => document.storage_path);
+    const { error: storageError } = await adminClient.storage
+      .from("paymeback-loan-documents")
+      .remove(paths);
+    if (storageError) {
+      return new Response(JSON.stringify({ error: "We could not safely remove your private files. Please try again or contact support." }), {
+        status: 500,
+        headers: { ...jsonHeaders, "access-control-allow-origin": allowedOrigin }
+      });
+    }
+  }
+
   const { error: deleteError } = await adminClient.auth.admin.deleteUser(user.id);
   if (deleteError) {
     return new Response(JSON.stringify({ error: "We could not delete your account. Please try again or contact support." }), {

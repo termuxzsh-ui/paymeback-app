@@ -94,16 +94,23 @@
     let user = null;
     let session = null;
     let loans = [];
+    let tasks = [];
+    let notes = [];
+    let followUps = [];
+    let documents = [];
+    let paymentSubmissions = [];
     let settings = { venmo:"", cashapp:"", zelle:"", theme:"light" };
     let accountHasSettings = false;
     let dark = false;
     let filter = "active";
     let sortBy = "balance";
     let search = "";
+    let noteLoanFilter = "";
     let authMode = "signin";
     let passwordRecovery = false;
     let pendingVerificationEmail = "";
     let currentView = "loading";
+    let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 
     function toast(message, error = false) {
       const box = document.createElement("div");
@@ -255,27 +262,45 @@
       if (!user) { renderAuth(); return; }
       currentView = "loading";
       $("#app").innerHTML = `<div class="grid min-h-screen place-items-center"><div class="text-center"><div class="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent"></div><p class="text-sm muted">Loading your private workspace…</p></div></div>`;
-      const [loanResult, paymentResult, installmentResult, adjustmentResult, settingsResult, historyResult] = await Promise.all([
+      const [loanResult, paymentResult, installmentResult, adjustmentResult, settingsResult, historyResult,
+        taskResult, noteResult, followUpResult, documentResult, submissionResult] = await Promise.all([
         supabase.from("loans").select("*").order("created_at", { ascending:false }),
         supabase.from("payments").select("*").order("payment_date", { ascending:false }),
         supabase.from("installments").select("*").order("installment_number"),
         supabase.from("loan_adjustments").select("*").order("adjustment_date", { ascending:false }),
         supabase.from("user_settings").select("*").eq("user_id", user.id).maybeSingle(),
-        supabase.from("loan_plan_history").select("*").order("changed_at",{ascending:false})
+        supabase.from("loan_plan_history").select("*").order("changed_at",{ascending:false}),
+        supabase.from("tasks").select("*").order("due_date",{ascending:true,nullsFirst:false}),
+        supabase.from("notes").select("*").order("updated_at",{ascending:false}),
+        supabase.from("loan_follow_ups").select("*").order("sent_at",{ascending:false}),
+        supabase.from("loan_documents").select("*").order("created_at",{ascending:false}),
+        supabase.from("borrower_payment_submissions").select("*").order("created_at",{ascending:false})
       ]);
-      for (const result of [loanResult,paymentResult,installmentResult,adjustmentResult,settingsResult,historyResult]) if (result.error) throw result.error;
+      for (const result of [loanResult,paymentResult,installmentResult,adjustmentResult,settingsResult,historyResult,
+        taskResult,noteResult,followUpResult,documentResult,submissionResult]) if (result.error) throw result.error;
       const group = (rows, key) => rows.reduce((map,row) => { (map[row[key]] ||= []).push(row); return map; }, {});
       const paymentsByLoan = group(paymentResult.data || [], "loan_id");
       const installmentsByLoan = group(installmentResult.data || [], "loan_id");
       const adjustmentsByLoan = group(adjustmentResult.data || [], "loan_id");
       const historyByLoan = group(historyResult.data || [], "loan_id");
+      const followUpsByLoan = group(followUpResult.data || [], "loan_id");
+      const documentsByLoan = group(documentResult.data || [], "loan_id");
+      const submissionsByLoan = group(submissionResult.data || [], "loan_id");
       loans = (loanResult.data || []).map(row => ({
         ...row,
         payments:paymentsByLoan[row.id] || [],
         installments:installmentsByLoan[row.id] || [],
         adjustments:adjustmentsByLoan[row.id] || [],
-        planHistory:historyByLoan[row.id] || []
+        planHistory:historyByLoan[row.id] || [],
+        followUps:followUpsByLoan[row.id] || [],
+        documents:documentsByLoan[row.id] || [],
+        paymentSubmissions:submissionsByLoan[row.id] || []
       }));
+      tasks = taskResult.data || [];
+      notes = noteResult.data || [];
+      followUps = followUpResult.data || [];
+      documents = documentResult.data || [];
+      paymentSubmissions = submissionResult.data || [];
       accountHasSettings = !!settingsResult.data;
       if (settingsResult.data) settings = {
         venmo:settingsResult.data.venmo || "", cashapp:settingsResult.data.cashapp || "",
@@ -348,12 +373,142 @@
         </article>
       </section>`;
     }
+    function workspaceNav() {
+      return `<nav class="mb-7 flex gap-2 overflow-x-auto border-b border-[var(--line)] pb-3" aria-label="Workspace sections">
+        ${[["dashboard","Overview","layout-dashboard"],["tasks","To-do list","check-square"],["notes","Notes","notebook-pen"],["calendar","Calendar","calendar-days"]].map(([view,label,icon])=>`<button class="btn ${currentView===view?"btn-primary":"btn-soft"} shrink-0 !py-2 text-xs" data-action="view" data-view="${view}"><i data-lucide="${icon}" class="h-4 w-4"></i>${label}</button>`).join("")}
+      </nav>`;
+    }
+    function renderWorkspacePage(title, description, content) {
+      $("#app").innerHTML = `<div class="mx-auto min-h-screen max-w-[1440px] px-4 pb-12 pt-5 sm:px-7 lg:px-10 lg:pt-8">
+        <header class="mb-6 flex items-center justify-between gap-3"><div class="hidden sm:block">${brand()}</div><div class="sm:hidden">${brand(true)}</div><div class="ml-auto flex items-center gap-2"><span class="hidden text-xs muted md:inline">${escapeHTML(user.email||"")}</span><button class="btn btn-soft !px-3" data-action="settings" aria-label="Settings"><i data-lucide="settings-2" class="h-4 w-4"></i></button><button class="btn btn-primary !px-3" data-action="new-loan" aria-label="New loan"><i data-lucide="plus" class="h-4 w-4"></i><span class="hidden sm:inline">New loan</span></button><button class="btn btn-soft !px-2.5 sm:!px-3" data-action="signout" aria-label="Sign out"><i data-lucide="log-out" class="h-4 w-4"></i><span class="hidden sm:inline">Sign out</span></button></div></header>
+        ${workspaceNav()}<section><h1 class="text-2xl font-extrabold tracking-tight">${escapeHTML(title)}</h1><p class="mb-6 mt-2 text-sm muted">${escapeHTML(description)}</p>${content}</section>
+        <footer class="mt-10 border-t border-[var(--line)] pt-4 text-xs muted">Private account workspace · <a href="#privacy" class="hover:text-indigo-500">Privacy</a></footer>
+      </div>`;
+      window.lucide?.createIcons();
+    }
+    function taskForm(task = null, loanId = "") {
+      const selectedLoan = loanId || task?.loan_id || "";
+      openModal(task?"Edit task":"Add a task",`<form id="task-form" data-id="${task?.id||""}" class="space-y-4">
+        <div><label class="mb-1.5 block text-xs font-semibold" for="task-title">Task *</label><input required maxlength="160" class="field" id="task-title" name="title" value="${escapeHTML(task?.title||"")}" placeholder="e.g. Check in about Friday's payment"></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="task-details">Details <span class="font-normal muted">(optional)</span></label><textarea maxlength="2000" rows="3" class="field resize-y" id="task-details" name="details">${escapeHTML(task?.details||"")}</textarea></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="task-due">Due date <span class="font-normal muted">(optional)</span></label><input type="date" class="field" id="task-due" name="dueDate" value="${escapeHTML(task?.due_date||"")}"></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="task-loan">Related loan <span class="font-normal muted">(optional)</span></label><select class="field" id="task-loan" name="loanId"><option value="">General task</option>${loans.map(loan=>`<option value="${loan.id}" ${selectedLoan===loan.id?"selected":""}>${escapeHTML(loan.borrower_name)}</option>`).join("")}</select></div>
+        <div class="flex justify-end gap-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">${task?"Save task":"Add task"}</button></div>
+      </form>`);
+    }
+    async function saveTask(form) {
+      const fd = new FormData(form);
+      const title = String(fd.get("title")||"").trim();
+      if (!title) throw new Error("Task title is required.");
+      const payload = {
+        owner_id:user.id,
+        loan_id:String(fd.get("loanId")||"")||null,
+        title:title.slice(0,160),
+        details:String(fd.get("details")||"").trim().slice(0,2000),
+        due_date:safeDate(fd.get("dueDate"))||null,
+        updated_at:new Date().toISOString()
+      };
+      const result = form.dataset.id
+        ? await supabase.from("tasks").update(payload).eq("id",form.dataset.id)
+        : await supabase.from("tasks").insert(payload);
+      if(result.error)throw result.error;
+      closeModal(); await loadWorkspace(); currentView="tasks"; renderTasksView(); toast(form.dataset.id?"Task updated":"Task added");
+    }
+    function renderTasksView() {
+      const pending = tasks.filter(task=>!task.completed_at);
+      const completed = tasks.filter(task=>task.completed_at);
+      const taskRow = task => {
+        const loan = loans.find(item=>item.id===task.loan_id);
+        const overdue = task.due_date && task.due_date < today() && !task.completed_at;
+        return `<article class="surface card flex items-start gap-3 p-4"><button class="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border ${task.completed_at?"border-emerald-500 bg-emerald-500 text-white":"border-[var(--line)] hover:border-indigo-500"}" data-action="toggle-task" data-id="${task.id}" aria-label="${task.completed_at?"Reopen":"Complete"} task">${task.completed_at?'<i data-lucide="check" class="h-4 w-4"></i>':""}</button><div class="min-w-0 flex-1"><p class="font-semibold ${task.completed_at?"line-through muted":""}">${escapeHTML(task.title)}</p>${task.details?`<p class="mt-1 whitespace-pre-wrap text-sm muted">${escapeHTML(task.details)}</p>`:""}<div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs ${overdue?"font-semibold text-rose-600":"muted"}">${task.due_date?`<span>${overdue?"Overdue":"Due"} ${dateLabel(task.due_date)}</span>`:""}${loan?`<button class="hover:text-indigo-500" data-action="history" data-id="${loan.id}">${escapeHTML(loan.borrower_name)}</button>`:'<span>General task</span>'}</div></div><div class="flex gap-1"><button class="icon-btn" data-action="edit-task" data-id="${task.id}" aria-label="Edit task"><i data-lucide="pencil" class="h-4 w-4"></i></button><button class="icon-btn text-rose-600" data-action="delete-task" data-id="${task.id}" aria-label="Delete task"><i data-lucide="trash-2" class="h-4 w-4"></i></button></div></article>`;
+      };
+      renderWorkspacePage("Daily to-do list","Keep follow-ups in one place. Tasks sync with your account and can optionally be linked to a loan.",`<div class="mb-5 flex flex-wrap items-center justify-between gap-3"><p class="text-sm muted">${pending.length} open · ${completed.length} completed</p><button class="btn btn-primary" data-action="new-task"><i data-lucide="plus" class="h-4 w-4"></i>Add task</button></div>
+        ${pending.length?`<div class="grid gap-3">${pending.map(taskRow).join("")}</div>`:'<div class="surface card empty-dash p-8 text-center"><p class="font-semibold">You’re all caught up.</p><p class="mt-1 text-sm muted">Add a follow-up so nothing slips through the cracks.</p></div>'}
+        ${completed.length?`<h2 class="mb-3 mt-8 text-sm font-bold">Completed</h2><div class="grid gap-3">${completed.map(taskRow).join("")}</div>`:""}`);
+    }
+    function noteForm(note = null, loanId = "") {
+      const selectedLoan = loanId || note?.loan_id || "";
+      openModal(note?"Edit note":"New private note",`<form id="note-form" data-id="${note?.id||""}" class="space-y-4">
+        <div><label class="mb-1.5 block text-xs font-semibold" for="note-title">Title <span class="font-normal muted">(optional)</span></label><input maxlength="160" class="field" id="note-title" name="title" value="${escapeHTML(note?.title||"")}" placeholder="e.g. Agreed to split next payment"></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="note-content">Note *</label><textarea required maxlength="10000" rows="7" class="field resize-y" id="note-content" name="content">${escapeHTML(note?.content||"")}</textarea><p class="mt-1 text-[11px] muted">Private to your account. Notes are never included in borrower statement links.</p></div>
+        <div><label class="mb-1.5 block text-xs font-semibold" for="note-loan">Related loan <span class="font-normal muted">(optional)</span></label><select class="field" id="note-loan" name="loanId"><option value="">General note</option>${loans.map(loan=>`<option value="${loan.id}" ${selectedLoan===loan.id?"selected":""}>${escapeHTML(loan.borrower_name)}</option>`).join("")}</select></div>
+        <div class="flex justify-end gap-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Save note</button></div>
+      </form>`);
+    }
+    async function saveNote(form) {
+      const fd = new FormData(form);
+      const content = String(fd.get("content")||"").trim();
+      if(!content)throw new Error("Note content is required.");
+      const payload = {
+        owner_id:user.id,
+        loan_id:String(fd.get("loanId")||"")||null,
+        title:String(fd.get("title")||"").trim().slice(0,160),
+        content:content.slice(0,10000),
+        updated_at:new Date().toISOString()
+      };
+      const result = form.dataset.id
+        ? await supabase.from("notes").update(payload).eq("id",form.dataset.id)
+        : await supabase.from("notes").insert(payload);
+      if(result.error)throw result.error;
+      closeModal();await loadWorkspace();currentView="notes";renderNotesView();toast(form.dataset.id?"Note updated":"Note saved");
+    }
+    function renderNotesView(loanId = "") {
+      if(loanId)noteLoanFilter=loanId;
+      else loanId=noteLoanFilter;
+      const query = ($("#notes-search")?.value||"").trim().toLowerCase();
+      const filtered = notes.filter(note=>(!loanId||note.loan_id===loanId)
+        && (!query||`${note.title} ${note.content}`.toLowerCase().includes(query)));
+      const noteRows = filtered.map(note=>{
+        const loan=loans.find(item=>item.id===note.loan_id);
+        return `<article class="surface card p-4 sm:p-5"><div class="flex items-start justify-between gap-3"><div class="min-w-0"><h2 class="font-bold">${escapeHTML(note.title||"Note")}</h2><p class="mt-1 text-xs muted">${loan?`Private · ${escapeHTML(loan.borrower_name)} · `:"Private · "}${dateLabel(note.updated_at.slice(0,10))}</p></div><div class="flex gap-1"><button class="icon-btn" data-action="edit-note" data-id="${note.id}" aria-label="Edit note"><i data-lucide="pencil" class="h-4 w-4"></i></button><button class="icon-btn text-rose-600" data-action="delete-note" data-id="${note.id}" aria-label="Delete note"><i data-lucide="trash-2" class="h-4 w-4"></i></button></div></div><p class="mt-4 whitespace-pre-wrap break-words text-sm leading-6">${escapeHTML(note.content)}</p></article>`;
+      });
+      renderWorkspacePage("Private notes","Keep context about conversations and agreements. Notes are private and never appear in shared borrower statements.",`<div class="mb-5 flex flex-col gap-3 sm:flex-row"><input class="field min-w-0 flex-1" id="notes-search" placeholder="Search your notes…" value="${escapeHTML(query)}"><button class="btn btn-primary shrink-0" data-action="new-note"${loanId?` data-loan-id="${loanId}"`:""}><i data-lucide="plus" class="h-4 w-4"></i>New note</button></div>${noteRows.length?`<div class="grid gap-3 xl:grid-cols-2">${noteRows.join("")}</div>`:'<div class="surface card empty-dash p-8 text-center"><p class="font-semibold">No notes yet.</p><p class="mt-1 text-sm muted">Create general notes or attach one to a loan.</p></div>'}`);
+    }
+    function calendarItems() {
+      const items = [];
+      for(const loan of loans){
+        if(loan.status!=="active")continue;
+        const schedule=(loan.installments||[]).filter(item=>item.is_current&&item.due_date);
+        for(const item of schedule){
+          const remaining=Math.max(0,Number(item.amount_due_cents)-Number(item.paid_cents||0)-Number(item.forgiven_cents||0));
+          if(remaining)items.push({date:item.due_date,title:`${loan.borrower_name} · ${money(remaining)} due`,loanId:loan.id,kind:"payment"});
+        }
+        if(!schedule.length&&loan.target_due_date&&balanceCents(loan)>0)items.push({date:loan.target_due_date,title:`${loan.borrower_name} · ${money(balanceCents(loan))} due`,loanId:loan.id,kind:"payment"});
+      }
+      for(const task of tasks)if(!task.completed_at&&task.due_date)items.push({date:task.due_date,title:task.title,loanId:task.loan_id,taskId:task.id,kind:"task"});
+      return items.sort((a,b)=>a.date.localeCompare(b.date));
+    }
+    function renderCalendarView() {
+      const year=calendarMonth.getFullYear(),month=calendarMonth.getMonth();
+      const firstDay=new Date(year,month,1),monthStart=firstDay.getDay(),days=new Date(year,month+1,0).getDate();
+      const items=calendarItems().filter(item=>item.date.startsWith(`${year}-${String(month+1).padStart(2,"0")}`));
+      const monthLabel=calendarMonth.toLocaleDateString(undefined,{month:"long",year:"numeric"});
+      const dayCells=Array.from({length:monthStart+days},(_,index)=>{
+        if(index<monthStart)return '<div aria-hidden="true"></div>';
+        const day=index-monthStart+1,date=`${year}-${String(month+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+        const count=items.filter(item=>item.date===date).length;
+        return `<div class="min-h-16 rounded-xl border ${date===today()?"border-indigo-500 bg-indigo-500/[.06]":"border-[var(--line)]"} p-2"><span class="text-xs font-semibold">${day}</span>${count?`<span class="mt-2 block rounded-md bg-indigo-500/10 px-1.5 py-1 text-[10px] font-semibold text-indigo-600">${count} item${count===1?"":"s"}</span>`:""}</div>`;
+      }).join("");
+      renderWorkspacePage("Calendar","Plan around repayment dates and follow-up tasks. Dates and tasks are private to your account.",`<div class="surface card mb-5 p-4"><div class="mb-4 flex items-center justify-between gap-3"><button class="btn btn-soft !px-3" data-action="calendar-prev" aria-label="Previous month"><i data-lucide="chevron-left" class="h-4 w-4"></i></button><h2 class="font-bold">${escapeHTML(monthLabel)}</h2><button class="btn btn-soft !px-3" data-action="calendar-next" aria-label="Next month"><i data-lucide="chevron-right" class="h-4 w-4"></i></button></div><div class="mb-2 grid grid-cols-7 gap-2 text-center text-[10px] font-bold uppercase muted">${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(day=>`<span>${day}</span>`).join("")}</div><div class="grid grid-cols-7 gap-2">${dayCells}</div></div><h2 class="mb-3 font-bold">This month · ${items.length} scheduled item${items.length===1?"":"s"}</h2>${items.length?`<div class="grid gap-2">${items.map(item=>`<button class="surface card flex items-center justify-between gap-3 p-3 text-left" data-action="${item.kind==="task"?"edit-task":"history"}" data-id="${item.kind==="task"?item.taskId:item.loanId}"><span class="min-w-0"><span class="block truncate text-sm font-semibold">${escapeHTML(item.title)}</span><span class="mt-1 block text-xs muted">${dateLabel(item.date)} · ${item.kind==="task"?"Task":"Repayment"}</span></span><i data-lucide="chevron-right" class="h-4 w-4 shrink-0 muted"></i></button>`).join("")}</div>`:'<p class="surface card p-5 text-sm muted">No repayments or task deadlines in this month.</p>'}<div class="mt-5"><button class="btn btn-soft" data-action="new-task"><i data-lucide="plus" class="h-4 w-4"></i>Add a task</button></div>`);
+    }
+    function taskPreview() {
+      const todayTasks=tasks.filter(task=>!task.completed_at&&(!task.due_date||task.due_date<=today())).slice(0,3);
+      return `<section class="surface card mb-6 p-4 sm:p-5"><div class="mb-3 flex items-center justify-between gap-3"><div><h2 class="font-bold">Today’s follow-ups</h2><p class="mt-1 text-xs muted">${todayTasks.length?"Tasks without a date or due today/overdue":"Your daily list is clear"}</p></div><button class="btn btn-soft !py-2 text-xs" data-action="view" data-view="tasks">Open to-do list</button></div>${todayTasks.length?`<div class="space-y-2">${todayTasks.map(task=>`<div class="flex items-center gap-2"><button class="grid h-5 w-5 place-items-center rounded-full border border-[var(--line)]" data-action="toggle-task" data-id="${task.id}" aria-label="Complete task"></button><button class="min-w-0 truncate text-left text-sm hover:text-indigo-500" data-action="edit-task" data-id="${task.id}">${escapeHTML(task.title)}</button></div>`).join("")}</div>`:'<p class="text-sm muted">Nothing needs attention right now. Add a follow-up whenever you need one.</p>'}</section>`;
+    }
+    function pendingSubmissionQueue() {
+      const pending=paymentSubmissions.filter(item=>item.status==="pending");
+      if(!pending.length)return "";
+      return `<section class="surface card mb-6 border-amber-300 p-4 sm:p-5"><div class="mb-3"><h2 class="font-bold">Borrower payment submissions</h2><p class="mt-1 text-xs muted">Review these reports. A balance changes only after you confirm a payment.</p></div><div class="divide-y divide-[var(--line)]">${pending.slice(0,5).map(item=>{const loan=loans.find(l=>l.id===item.loan_id);return `<div class="flex flex-wrap items-center justify-between gap-3 py-3"><div><p class="text-sm font-semibold">${escapeHTML(loan?.borrower_name||"Loan")}</p><p class="text-xs muted">${money(item.amount_cents)} · ${dateLabel(item.payment_date)}${item.note?` · ${escapeHTML(item.note)}`:""}</p></div><div class="flex gap-2"><button class="btn btn-soft !px-3 !py-2 text-xs" data-action="review-submission" data-id="${item.id}" data-approve="false">Decline</button><button class="btn btn-primary !px-3 !py-2 text-xs" data-action="review-submission" data-id="${item.id}" data-approve="true">Confirm received</button></div></div>`}).join("")}</div></section>`;
+    }
     function planLabel(loan) {
       if (loan.repayment_type === "installment") return `${money(loan.installment_amount_cents)} monthly · ${loan.installment_count} payments`;
       if (loan.repayment_type === "one_time") return "One-time repayment";
       return "Flexible repayment";
     }
     function renderDashboard() {
+      if (currentView === "tasks") { renderTasksView(); return; }
+      if (currentView === "notes") { renderNotesView(); return; }
+      if (currentView === "calendar") { renderCalendarView(); return; }
       if (currentView !== "dashboard") return;
       const active = loans.filter(l => l.status === "active");
       const lent = loans.reduce((sum,l) => sum + Number(l.initial_amount_cents || 0), 0);
@@ -376,10 +531,11 @@
         <aside class="hidden w-64 shrink-0 flex-col border-r border-[var(--line)] bg-[var(--surface)] px-5 py-7 lg:flex">${brand()}<p class="mb-3 mt-10 px-3 text-[10px] font-bold uppercase tracking-[.18em] muted">Workspace</p><button class="nav-active flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold"><i data-lucide="layout-dashboard" class="h-4 w-4"></i>Overview</button><button class="mt-auto rounded-2xl bg-indigo-500/[.06] p-4 text-left"><span class="mb-2 grid h-8 w-8 place-items-center rounded-lg bg-indigo-500/10 text-indigo-500"><i data-lucide="shield-check" class="h-4 w-4"></i></span><span class="text-sm font-bold">Private by design</span><span class="mt-1 block text-xs leading-5 muted">Your records are protected by your account and database access rules.</span></button></aside>
         <section class="min-w-0 flex-1 px-4 pb-12 pt-5 sm:px-7 lg:px-10 lg:pt-8">
           <header class="mb-8 flex items-center justify-between gap-3"><div class="lg:hidden">${brand(true)}</div><div class="hidden lg:block"><p class="text-sm muted">${escapeHTML(user.email || "Your personal workspace")}</p></div><div class="ml-auto flex items-center gap-2"><button class="btn btn-soft !px-3" data-action="theme"><i data-lucide="${dark?"sun":"moon"}" class="h-4 w-4"></i><span class="hidden sm:inline">${dark?"Light":"Dark"} mode</span></button><button class="btn btn-soft !px-3" data-action="settings" aria-label="Settings"><i data-lucide="settings-2" class="h-4 w-4"></i></button><button class="btn btn-primary" data-action="new-loan"><i data-lucide="plus" class="h-4 w-4"></i><span class="hidden sm:inline">New loan</span><span class="sm:hidden">Add</span></button><button class="btn btn-soft !px-2.5 sm:!px-3" data-action="signout" aria-label="Sign out" title="Sign out"><i data-lucide="log-out" class="h-4 w-4"></i><span class="hidden sm:inline">Sign out</span></button></div></header>
+          ${workspaceNav()}
           <div class="mb-7"><p class="mb-2 inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-emerald-600"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Email verified account</p><h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl">Your lending, clearly in view.</h1><p class="mt-2 text-sm muted">Track repayment plans, payments, and friendly follow-ups.</p></div>
           ${!migrationDone && oldLoans.length?`<section class="surface card mb-5 flex flex-col gap-3 border-indigo-200 bg-indigo-500/[.04] p-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 class="font-bold">Import your existing local loans?</h2><p class="mt-1 text-xs leading-5 muted">${oldLoans.length} record${oldLoans.length===1?"":"s"} found on this browser. They will be added to your account; local data will remain untouched.</p></div><button class="btn btn-primary" data-action="migrate"><i data-lucide="database-backup" class="h-4 w-4"></i>Review &amp; import</button></section>`:""}
           <div class="mb-7 grid grid-cols-2 gap-3 xl:grid-cols-4">${metric("hand-coins","Total amount lent",money(lent),"text-indigo-600","bg-indigo-500/10")}${metric("arrow-down-left","Total collected",money(collected),"text-emerald-600","bg-emerald-500/10")}${metric("wallet","Outstanding balance",money(outstanding),"text-amber-600","bg-amber-500/10")}${metric("users-round","Active debtors",active.length,"text-sky-600","bg-sky-500/10")}</div>
-          ${dashboardInsights()}
+          ${taskPreview()}${pendingSubmissionQueue()}${dashboardInsights()}
           <section class="surface card mb-6 flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5"><div><h2 class="font-bold">Your loans</h2><p class="mt-1 text-xs muted">${shown.length} ${shown.length===1?"record":"records"} in this view</p></div><div class="flex flex-col gap-2 sm:flex-row"><label class="relative min-w-0 sm:w-56"><i data-lucide="search" class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 muted"></i><input class="field !py-2 !pl-9 text-sm" id="search" placeholder="Search borrowers or notes…" value="${escapeHTML(search)}"></label><select class="field !w-auto !py-2 text-sm" id="sort"><option value="balance" ${sortBy==="balance"?"selected":""}>Sort: balance</option><option value="due" ${sortBy==="due"?"selected":""}>Sort: due date</option><option value="name" ${sortBy==="name"?"selected":""}>Sort: name</option></select></div></section>
           <div class="mb-4 flex gap-1 overflow-x-auto border-b border-[var(--line)]" role="tablist">${tab("active","Active")}${tab("paid","Paid off")}${tab("all","All loans")}${tab("archived","Archived")}</div>
           <section id="loan-list" class="grid gap-3 xl:grid-cols-2">${shown.length?shown.map(loanCard).join(""):emptyState()}</section>
@@ -408,7 +564,7 @@
         <div class="mt-4 flex items-center justify-between gap-3 rounded-xl bg-slate-500/[.04] px-3 py-2"><p class="truncate text-xs font-semibold">${escapeHTML(planLabel(loan))}</p>${loan.repayment_type==="installment"?`<span class="shrink-0 text-[10px] muted">${loan.installment_count} installments</span>`:""}</div>
         <div class="mt-4 grid grid-cols-2 gap-3"><div><p class="text-[11px] muted">Remaining</p><p class="mt-1 text-xl font-extrabold tracking-tight">${money(left)}</p></div><div class="text-right"><p class="text-[11px] muted">Original loan</p><p class="mt-1 font-bold">${money(total)}</p></div></div>
         <div class="mt-4"><div class="mb-1.5 flex justify-between text-[10px] font-medium muted"><span>${pct}% repaid</span><span>${money(paid)} collected</span></div><div class="h-1.5 overflow-hidden rounded-full bg-slate-500/10"><div class="h-full rounded-full bg-gradient-to-r from-indigo-500 to-emerald-400" style="width:${pct}%"></div></div></div>
-        <div class="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)] pt-3"><p class="text-[11px] ${overdue?"font-semibold text-rose-600":"muted"}"><i data-lucide="${overdue?"triangle-alert":"calendar-days"}" class="mr-1 inline h-3.5 w-3.5 align-[-2px]"></i>${due?`${overdue?"Past due":"Next due"} ${dateLabel(due)}`:`Started ${dateLabel(loan.start_date)}`}</p><div class="flex gap-1"><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="history" data-id="${loan.id}"><i data-lucide="list-checks" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Details</span></button><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="share" data-id="${loan.id}" title="Share statement"><i data-lucide="link-2" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Share</span></button>${loan.status!=="archived"&&left>0?`<button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="payment" data-id="${loan.id}"><i data-lucide="plus" class="h-3.5 w-3.5"></i>Payment</button>`:""}<button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="reminder" data-id="${loan.id}"><i data-lucide="message-circle" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Remind</span></button></div></div></article>`;
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)] pt-3"><p class="text-[11px] ${overdue?"font-semibold text-rose-600":"muted"}"><i data-lucide="${overdue?"triangle-alert":"calendar-days"}" class="mr-1 inline h-3.5 w-3.5 align-[-2px]"></i>${due?`${overdue?"Past due":"Next due"} ${dateLabel(due)}`:`Started ${dateLabel(loan.start_date)}`}</p><div class="flex flex-wrap gap-1"><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="history" data-id="${loan.id}"><i data-lucide="list-checks" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Details</span></button><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="loan-notes" data-id="${loan.id}" title="Private loan notes"><i data-lucide="notebook-pen" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Notes</span></button><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="documents" data-id="${loan.id}" title="Private documents"><i data-lucide="paperclip" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Files</span></button><button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="share" data-id="${loan.id}" title="Share statement"><i data-lucide="link-2" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Share</span></button>${loan.status!=="archived"&&left>0?`<button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="payment" data-id="${loan.id}"><i data-lucide="plus" class="h-3.5 w-3.5"></i>Payment</button>`:""}<button class="btn btn-soft !rounded-lg !px-2.5 !py-1.5 text-xs" data-action="reminder" data-id="${loan.id}"><i data-lucide="message-circle" class="h-3.5 w-3.5"></i><span class="hidden sm:inline">Remind</span></button></div></div></article>`;
     }
     function emptyState() {
       const title = search ? "No matches found" : filter==="paid" ? "No paid-off loans yet" : filter==="archived" ? "Nothing archived" : "Start tracking your first loan";
@@ -462,8 +618,60 @@
         settings.zelle.trim() ? `Zelle: ${settings.zelle.trim()}` : ""
       ].filter(Boolean).join("\n");
     }
+    function loanNotesView(loan) {
+      currentView="notes";
+      renderNotesView(loan.id);
+    }
+    function documentsModal(loan) {
+      const rows=documents.filter(item=>item.loan_id===loan.id);
+      openModal(`${loan.borrower_name} · private files`,`<p class="mb-4 text-sm leading-6 muted">Files are private to your account and are never included in borrower statements. PDF, JPEG, PNG, or WebP · maximum 10 MB per file.</p><form id="document-form" data-loan-id="${loan.id}" class="mb-5 space-y-3"><label class="block text-xs font-semibold" for="document-file">Add a document</label><input required type="file" id="document-file" name="file" accept="application/pdf,image/jpeg,image/png,image/webp" class="field"><button class="btn btn-primary" type="submit"><i data-lucide="upload" class="h-4 w-4"></i>Upload privately</button></form><h3 class="mb-2 text-sm font-bold">Saved documents (${rows.length})</h3>${rows.length?`<div class="divide-y divide-[var(--line)]">${rows.map(file=>`<div class="flex items-center justify-between gap-3 py-3"><div class="min-w-0"><p class="truncate text-sm font-semibold">${escapeHTML(file.file_name)}</p><p class="text-xs muted">${(file.size_bytes/1024/1024).toFixed(2)} MB · ${dateLabel(file.created_at.slice(0,10))}</p></div><div class="flex gap-1"><button class="btn btn-soft !px-2.5 !py-1.5 text-xs" data-action="open-document" data-id="${file.id}">Open</button><button class="icon-btn text-rose-600" data-action="delete-document" data-id="${file.id}" aria-label="Delete file"><i data-lucide="trash-2" class="h-4 w-4"></i></button></div></div>`).join("")}</div>`:'<p class="rounded-xl bg-slate-500/[.04] p-4 text-sm muted">No documents attached to this loan.</p>'}`);
+    }
+    async function uploadLoanDocument(form) {
+      const loan=loans.find(item=>item.id===form.dataset.loanId);
+      const file=$("#document-file")?.files?.[0];
+      if(!loan||!file)throw new Error("Choose a file and a loan.");
+      const allowed=["application/pdf","image/jpeg","image/png","image/webp"];
+      if(!allowed.includes(file.type))throw new Error("Choose a PDF, JPEG, PNG, or WebP file.");
+      if(file.size<1||file.size>10*1024*1024)throw new Error("Each file must be 10 MB or smaller.");
+      const fileName=file.name.replace(/[^\w.-]/g,"_").slice(-120)||"document";
+      const path=`${user.id}/${loan.id}/${crypto.randomUUID()}-${fileName}`;
+      const storage=supabase.storage.from("paymeback-loan-documents");
+      const upload=await storage.upload(path,file,{contentType:file.type,upsert:false});
+      if(upload.error)throw upload.error;
+      const saved=await supabase.from("loan_documents").insert({
+        owner_id:user.id,loan_id:loan.id,storage_path:path,file_name:file.name.slice(0,255),mime_type:file.type,size_bytes:file.size
+      });
+      if(saved.error){
+        const cleanup=await storage.remove([path]);
+        if(cleanup.error)throw new Error(`${saved.error.message} The uploaded file could not be cleaned up: ${cleanup.error.message}`);
+        throw saved.error;
+      }
+      await loadWorkspace();
+      documentsModal(loan);toast("Document uploaded privately");
+    }
+    async function openLoanDocument(documentId) {
+      const file=documents.find(item=>item.id===documentId);
+      if(!file)throw new Error("Document not found.");
+      const {data,error}=await supabase.storage.from("paymeback-loan-documents").createSignedUrl(file.storage_path,60);
+      if(error)throw error;
+      if(!data?.signedUrl)throw new Error("Could not create a private document link.");
+      location.assign(data.signedUrl);
+    }
+    async function deleteLoanDocument(documentId) {
+      const file=documents.find(item=>item.id===documentId);
+      if(!file||!confirm(`Delete ${file.file_name}? This cannot be undone.`))return;
+      const storage=await supabase.storage.from("paymeback-loan-documents").remove([file.storage_path]);
+      if(storage.error)throw storage.error;
+      const result=await supabase.from("loan_documents").delete().eq("id",file.id);
+      if(result.error)throw result.error;
+      await loadWorkspace();
+      const loan=loans.find(item=>item.id===file.loan_id);
+      if(loan)documentsModal(loan);else closeModal();
+      toast("Document deleted");
+    }
     function reminderForm(loan) {
-      openModal("Create a payment reminder", `<form id="reminder-form" data-id="${loan.id}" class="space-y-4"><p class="text-sm leading-6 muted">Copy a friendly note and send it yourself. PayMeBack never sends reminders automatically.</p><div class="rounded-xl bg-indigo-500/[.07] p-3"><p class="text-sm font-bold">${escapeHTML(loan.borrower_name)} <span class="font-normal muted">· ${money(balanceCents(loan))} remaining</span></p></div><div><label class="mb-1.5 block text-xs font-semibold" for="reminder-tone">Tone</label><select class="field" id="reminder-tone"><option>Friendly</option><option>Formal</option><option>Humorous</option><option>Direct</option></select></div><div><label class="mb-1.5 block text-xs font-semibold" for="reminder-copy">Message</label><textarea id="reminder-copy" rows="8" class="field resize-y text-sm leading-6"></textarea></div><div class="flex justify-between gap-2"><button type="button" class="btn btn-soft" data-action="regenerate-reminder">Regenerate</button><button type="button" class="btn btn-primary" data-action="copy-reminder"><i data-lucide="copy" class="h-4 w-4"></i>Copy</button></div></form>`);
+      const history=(loan.followUps||[]).slice(0,5);
+      openModal("Create a payment reminder", `<form id="reminder-form" data-id="${loan.id}" class="space-y-4"><p class="text-sm leading-6 muted">Copy a friendly note and send it yourself. PayMeBack never sends reminders automatically.</p><div class="rounded-xl bg-indigo-500/[.07] p-3"><p class="text-sm font-bold">${escapeHTML(loan.borrower_name)} <span class="font-normal muted">· ${money(balanceCents(loan))} remaining</span></p></div><div><label class="mb-1.5 block text-xs font-semibold" for="reminder-tone">Tone</label><select class="field" id="reminder-tone"><option>Friendly</option><option>Formal</option><option>Humorous</option><option>Direct</option></select></div><div><label class="mb-1.5 block text-xs font-semibold" for="reminder-copy">Message</label><textarea id="reminder-copy" rows="8" class="field resize-y text-sm leading-6"></textarea></div><div class="flex flex-wrap justify-between gap-2"><button type="button" class="btn btn-soft" data-action="regenerate-reminder">Regenerate</button><div class="flex gap-2"><button type="button" class="btn btn-soft" data-action="reminder-task" data-id="${loan.id}"><i data-lucide="list-plus" class="h-4 w-4"></i>Make task</button><button type="button" class="btn btn-primary" data-action="copy-reminder"><i data-lucide="copy" class="h-4 w-4"></i>Copy</button></div></div><button type="button" class="btn btn-soft w-full" data-action="mark-reminder-sent" data-id="${loan.id}">I sent this reminder</button>${history.length?`<div class="border-t border-[var(--line)] pt-3"><p class="mb-2 text-xs font-bold">Recent follow-ups</p>${history.map(item=>`<p class="py-1 text-xs muted">${dateLabel(item.sent_at.slice(0,10))}${item.note?` · ${escapeHTML(item.note)}`:""}</p>`).join("")}</div>`:""}</form>`);
       const form = $("#reminder-form");
       form.dataset.name = loan.borrower_name;
       form.dataset.balance = String(balanceCents(loan));
@@ -498,21 +706,21 @@
       bytes.forEach(byte => binary += String.fromCharCode(byte));
       return btoa(binary).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
     }
-    async function createShareLink(loanId, expiry) {
+    async function createShareLink(loanId, expiry, allowPaymentSubmissions) {
       if (!user || location.protocol === "file:") throw new Error("Share links need the published HTTPS app address.");
       const token = randomToken();
       const tokenHash = await sha256(token);
       const expiresAt = expiry ? new Date(Date.now() + Number(expiry) * 86400000).toISOString() : null;
-      const { error } = await supabase.from("share_links").insert({ loan_id:loanId, owner_id:user.id, token_hash:tokenHash, expires_at:expiresAt });
+      const { error } = await supabase.from("share_links").insert({ loan_id:loanId, owner_id:user.id, token_hash:tokenHash, expires_at:expiresAt, allow_payment_submissions:allowPaymentSubmissions });
       if (error) throw error;
       const url = new URL(location.href);
       url.hash = `share=${token}`;
       return url.toString();
     }
     async function shareForm(loan) {
-      const { data, error } = await supabase.from("share_links").select("id,created_at,expires_at,revoked_at").eq("loan_id",loan.id).order("created_at",{ascending:false});
+      const { data, error } = await supabase.from("share_links").select("id,created_at,expires_at,revoked_at,allow_payment_submissions").eq("loan_id",loan.id).order("created_at",{ascending:false});
       if (error) { toast(error.message,true); return; }
-      openModal("Borrower statement links", `<p class="mb-4 text-sm leading-6 muted">Anyone with a link can view this loan’s statement. The link contains no loan details and can be revoked at any time.</p><div class="mb-4 flex gap-2"><select id="share-expiry" class="field"><option value="7">Expires in 7 days</option><option value="30" selected>Expires in 30 days</option><option value="90">Expires in 90 days</option><option value="">Never expires</option></select><button class="btn btn-primary" data-action="create-share" data-id="${loan.id}"><i data-lucide="link" class="h-4 w-4"></i>Create link</button></div><h3 class="mb-2 text-sm font-bold">Existing links</h3><div class="max-h-56 space-y-2 overflow-auto">${data?.length?data.map(link=>`<div class="flex items-center justify-between gap-3 rounded-xl border border-[var(--line)] p-3"><div><p class="text-xs font-semibold">${link.revoked_at?"Revoked":link.expires_at&&new Date(link.expires_at)<new Date()?"Expired":"Active"}</p><p class="mt-1 text-[10px] muted">Created ${dateLabel(link.created_at.slice(0,10))}${link.expires_at?` · expires ${dateLabel(link.expires_at.slice(0,10))}`:" · no expiry"}</p></div>${!link.revoked_at&&(!link.expires_at||new Date(link.expires_at)>new Date())?`<button class="btn btn-soft !px-2 !py-1.5 text-xs text-rose-600" data-action="revoke-share" data-share-id="${link.id}">Revoke</button>`:""}</div>`).join(""):'<p class="rounded-xl bg-slate-500/[.04] p-4 text-sm muted">No statement links yet.</p>'}</div>`);
+      openModal("Borrower statement links", `<p class="mb-4 text-sm leading-6 muted">Anyone with a link can view this loan’s statement. The link contains no loan details and can be revoked at any time.</p><div class="mb-4 space-y-3"><select id="share-expiry" class="field"><option value="7">Expires in 7 days</option><option value="30" selected>Expires in 30 days</option><option value="90">Expires in 90 days</option><option value="">Never expires</option></select><label class="flex items-start gap-2 rounded-xl border border-[var(--line)] p-3 text-xs"><input id="share-allow-payments" type="checkbox" class="mt-0.5"><span><strong>Allow borrower to report a payment</strong><span class="mt-1 block muted">Reports stay pending until you confirm the money was received.</span></span></label><button class="btn btn-primary" data-action="create-share" data-id="${loan.id}"><i data-lucide="link" class="h-4 w-4"></i>Create link</button></div><h3 class="mb-2 text-sm font-bold">Existing links</h3><div class="max-h-56 space-y-2 overflow-auto">${data?.length?data.map(link=>`<div class="flex items-center justify-between gap-3 rounded-xl border border-[var(--line)] p-3"><div><p class="text-xs font-semibold">${link.revoked_at?"Revoked":link.expires_at&&new Date(link.expires_at)<new Date()?"Expired":"Active"}</p><p class="mt-1 text-[10px] muted">Created ${dateLabel(link.created_at.slice(0,10))}${link.expires_at?` · expires ${dateLabel(link.expires_at.slice(0,10))}`:" · no expiry"}${link.allow_payment_submissions?" · payment reports on":""}</p></div>${!link.revoked_at&&(!link.expires_at||new Date(link.expires_at)>new Date())?`<button class="btn btn-soft !px-2 !py-1.5 text-xs text-rose-600" data-action="revoke-share" data-share-id="${link.id}">Revoke</button>`:""}</div>`).join(""):'<p class="rounded-xl bg-slate-500/[.04] p-4 text-sm muted">No statement links yet.</p>'}</div>`);
       $("#modal-root .modal-panel").dataset.loanId = loan.id;
     }
     async function manageAllShares() {
@@ -534,7 +742,8 @@
       const cash = String(options.cashapp||"").trim().replace(/^\$/,"");
       const actions = `${venmo?`<a class="btn btn-soft flex-1" target="_blank" rel="noopener noreferrer" href="https://venmo.com/${encodeURIComponent(venmo)}"><i data-lucide="send" class="h-4 w-4 text-sky-500"></i>Pay via Venmo</a>`:""}${cash?`<a class="btn btn-soft flex-1" target="_blank" rel="noopener noreferrer" href="https://cash.app/$${encodeURIComponent(cash)}"><i data-lucide="circle-dollar-sign" class="h-4 w-4 text-emerald-500"></i>Pay via Cash App</a>`:""}`;
       const schedule = data.installments || [];
-      $("#app").innerHTML = `<div class="mx-auto min-h-screen max-w-2xl px-4 py-8 sm:px-8 sm:py-12"><header class="mb-8 flex items-center justify-between">${brand()}<a href="#" class="btn btn-soft !px-3 text-xs"><i data-lucide="x" class="h-4 w-4"></i>Close statement</a></header><section class="surface card overflow-hidden"><div class="bg-gradient-to-br from-indigo-600 to-violet-600 px-6 py-8 text-white sm:px-9 sm:py-10"><p class="mb-3 text-xs font-bold uppercase tracking-[.15em] text-indigo-100">Personal loan statement</p><h1 class="text-2xl font-extrabold sm:text-3xl">Hi, ${escapeHTML(data.borrowerName)}</h1><p class="mt-2 max-w-md text-sm leading-6 text-indigo-100">A clear summary of your loan${data.reason?` for ${escapeHTML(data.reason)}`:""}.</p></div><div class="grid grid-cols-2 gap-4 border-b border-[var(--line)] px-6 py-6 sm:px-9"><div><p class="text-xs muted">Original amount</p><p class="mt-1 text-xl font-bold">${money(data.initialAmountCents)}</p></div><div><p class="text-xs muted">Remaining balance</p><p class="mt-1 text-xl font-extrabold text-indigo-500">${money(remaining)}</p></div><div><p class="text-xs muted">Paid so far</p><p class="mt-1 font-bold text-emerald-600">${money(totalPaid)}</p></div><div><p class="text-xs muted">Loan date</p><p class="mt-1 font-semibold">${dateLabel(data.startDate)}</p></div></div><div class="px-6 py-6 sm:px-9"><div class="mb-4 flex items-center justify-between"><h2 class="font-bold">Repayment plan</h2></div><p class="mb-3 rounded-xl bg-slate-500/[.04] p-3 text-sm font-semibold">${escapeHTML(data.repaymentType==="installment"?`${money(data.installmentAmountCents)} monthly · ${data.installmentCount} planned installments`:data.repaymentType==="one_time"?"One-time repayment":"Flexible repayment")}</p>${schedule.length?`<div class="mb-6 divide-y divide-[var(--line)]">${schedule.map(i=>`<div class="flex items-center justify-between gap-3 py-2 text-xs"><span>Installment ${i.number} · ${dateLabel(i.dueDate)}</span><span class="text-right"><strong class="block">${money(i.paidCents)} paid</strong>${Number(i.forgivenCents)>0?`<span class="text-indigo-500">${money(i.forgivenCents)} forgiven · </span>`:""}<span class="muted">of ${money(i.amountCents)}</span></span></div>`).join("")}</div>`:""}<div class="mb-3 flex items-center justify-between"><h2 class="font-bold">Payment history</h2><span class="rounded-full bg-slate-500/10 px-2.5 py-1 text-[10px] font-bold muted">${(data.payments||[]).length} ${(data.payments||[]).length===1?"payment":"payments"}</span></div>${data.payments?.length?`<div class="divide-y divide-[var(--line)]">${data.payments.map(p=>`<div class="flex items-center justify-between gap-3 py-3"><div><p class="text-sm font-semibold">${escapeHTML(p.note||"Payment received")}</p><p class="mt-0.5 text-xs muted">${dateLabel(p.date)}</p></div><p class="font-bold text-emerald-600">−${money(p.amountCents)}</p></div>`).join("")}</div>`:'<p class="rounded-xl bg-slate-500/[.05] px-4 py-5 text-center text-sm muted">No payments have been recorded yet.</p>'}${data.adjustments?.length?`<h3 class="mb-2 mt-5 text-sm font-bold">Balance adjustments</h3>${data.adjustments.map(a=>`<div class="flex justify-between gap-2 py-2 text-xs"><span>${escapeHTML(a.note||"Balance forgiveness")} · ${dateLabel(a.date)}</span><span class="font-semibold text-indigo-500">−${money(a.amountCents)}</span></div>`).join("")}`:""}</div><div class="border-t border-[var(--line)] bg-slate-500/[.025] px-6 py-6 sm:px-9"><h2 class="mb-3 font-bold">Payment options</h2>${actions?`<div class="flex flex-col gap-2 sm:flex-row">${actions}</div>`:""}${options.zelle?`<div class="mt-3 rounded-xl border border-[var(--line)] p-3"><p class="text-[11px] font-semibold muted">Zelle</p><p class="mt-1 break-all text-sm font-semibold">${escapeHTML(options.zelle)}</p></div>`:""}${!actions&&!options.zelle?'<p class="text-sm muted">Please contact the lender for payment details.</p>':""}</div><p class="px-6 py-4 text-center text-[11px] leading-5 muted sm:px-9">This is an informal personal loan tracking summary provided for record-keeping purposes. This read-only statement was shared by the lender.</p></section><p class="mt-5 text-center text-xs muted">Powered by PayMeBack · Private by design</p></div>`;
+      const paymentForm=data.allowPaymentSubmissions&&remaining>0?`<section class="border-t border-[var(--line)] px-6 py-6 sm:px-9"><h2 class="font-bold">Report a payment</h2><p class="mb-4 mt-1 text-sm leading-6 muted">Tell the lender about a payment you made. It will not change the balance until they confirm receiving it.</p><form id="borrower-payment-form" class="space-y-3"><input type="hidden" name="token" value="${escapeHTML(token)}"><div class="grid grid-cols-2 gap-3"><div><label class="mb-1 block text-xs font-semibold" for="reported-amount">Amount *</label><input required id="reported-amount" name="amount" type="number" min="0.01" step="0.01" max="${centsToDollars(remaining)}" class="field"></div><div><label class="mb-1 block text-xs font-semibold" for="reported-date">Payment date</label><input required id="reported-date" name="date" type="date" max="${today()}" value="${today()}" class="field"></div></div><div><label class="mb-1 block text-xs font-semibold" for="reported-note">Note <span class="font-normal muted">(optional)</span></label><input maxlength="300" id="reported-note" name="note" class="field"></div><button class="btn btn-primary" type="submit">Send payment report</button></form></section>`:"";
+      $("#app").innerHTML = `<div class="mx-auto min-h-screen max-w-2xl px-4 py-8 sm:px-8 sm:py-12"><header class="mb-8 flex items-center justify-between">${brand()}<a href="#" class="btn btn-soft !px-3 text-xs"><i data-lucide="x" class="h-4 w-4"></i>Close statement</a></header><section class="surface card overflow-hidden"><div class="bg-gradient-to-br from-indigo-600 to-violet-600 px-6 py-8 text-white sm:px-9 sm:py-10"><p class="mb-3 text-xs font-bold uppercase tracking-[.15em] text-indigo-100">Personal loan statement</p><h1 class="text-2xl font-extrabold sm:text-3xl">Hi, ${escapeHTML(data.borrowerName)}</h1><p class="mt-2 max-w-md text-sm leading-6 text-indigo-100">A clear summary of your loan${data.reason?` for ${escapeHTML(data.reason)}`:""}.</p></div><div class="grid grid-cols-2 gap-4 border-b border-[var(--line)] px-6 py-6 sm:px-9"><div><p class="text-xs muted">Original amount</p><p class="mt-1 text-xl font-bold">${money(data.initialAmountCents)}</p></div><div><p class="text-xs muted">Remaining balance</p><p class="mt-1 text-xl font-extrabold text-indigo-500">${money(remaining)}</p></div><div><p class="text-xs muted">Paid so far</p><p class="mt-1 font-bold text-emerald-600">${money(totalPaid)}</p></div><div><p class="text-xs muted">Loan date</p><p class="mt-1 font-semibold">${dateLabel(data.startDate)}</p></div></div><div class="px-6 py-6 sm:px-9"><div class="mb-4 flex items-center justify-between"><h2 class="font-bold">Repayment plan</h2></div><p class="mb-3 rounded-xl bg-slate-500/[.04] p-3 text-sm font-semibold">${escapeHTML(data.repaymentType==="installment"?`${money(data.installmentAmountCents)} monthly · ${data.installmentCount} planned installments`:data.repaymentType==="one_time"?"One-time repayment":"Flexible repayment")}</p>${schedule.length?`<div class="mb-6 divide-y divide-[var(--line)]">${schedule.map(i=>`<div class="flex items-center justify-between gap-3 py-2 text-xs"><span>Installment ${i.number} · ${dateLabel(i.dueDate)}</span><span class="text-right"><strong class="block">${money(i.paidCents)} paid</strong>${Number(i.forgivenCents)>0?`<span class="text-indigo-500">${money(i.forgivenCents)} forgiven · </span>`:""}<span class="muted">of ${money(i.amountCents)}</span></span></div>`).join("")}</div>`:""}<div class="mb-3 flex items-center justify-between"><h2 class="font-bold">Payment history</h2><span class="rounded-full bg-slate-500/10 px-2.5 py-1 text-[10px] font-bold muted">${(data.payments||[]).length} ${(data.payments||[]).length===1?"payment":"payments"}</span></div>${data.payments?.length?`<div class="divide-y divide-[var(--line)]">${data.payments.map(p=>`<div class="flex items-center justify-between gap-3 py-3"><div><p class="text-sm font-semibold">${escapeHTML(p.note||"Payment received")}</p><p class="mt-0.5 text-xs muted">${dateLabel(p.date)}</p></div><p class="font-bold text-emerald-600">−${money(p.amountCents)}</p></div>`).join("")}</div>`:'<p class="rounded-xl bg-slate-500/[.05] px-4 py-5 text-center text-sm muted">No payments have been recorded yet.</p>'}${data.adjustments?.length?`<h3 class="mb-2 mt-5 text-sm font-bold">Balance adjustments</h3>${data.adjustments.map(a=>`<div class="flex justify-between gap-2 py-2 text-xs"><span>${escapeHTML(a.note||"Balance forgiveness")} · ${dateLabel(a.date)}</span><span class="font-semibold text-indigo-500">−${money(a.amountCents)}</span></div>`).join("")}`:""}</div><div class="border-t border-[var(--line)] bg-slate-500/[.025] px-6 py-6 sm:px-9"><h2 class="mb-3 font-bold">Payment options</h2>${actions?`<div class="flex flex-col gap-2 sm:flex-row">${actions}</div>`:""}${options.zelle?`<div class="mt-3 rounded-xl border border-[var(--line)] p-3"><p class="text-[11px] font-semibold muted">Zelle</p><p class="mt-1 break-all text-sm font-semibold">${escapeHTML(options.zelle)}</p></div>`:""}${!actions&&!options.zelle?'<p class="text-sm muted">Please contact the lender for payment details.</p>':""}</div>${paymentForm}<p class="px-6 py-4 text-center text-[11px] leading-5 muted sm:px-9">This is an informal personal loan tracking summary provided for record-keeping purposes. This read-only statement was shared by the lender.</p></section><p class="mt-5 text-center text-xs muted">Powered by PayMeBack · Private by design</p></div>`;
       window.lucide?.createIcons();
     }
     function renderShareError(message) {
@@ -549,19 +758,19 @@
       const title = isTerms ? "Terms of Service" : "Privacy Policy";
       const body = isTerms ? `<p class="rounded-xl border border-amber-300 bg-amber-500/[.08] p-3 text-sm text-amber-800 dark:text-amber-200"><strong>Draft for review.</strong> Replace all bracketed placeholders and obtain qualified legal review before accepting users.</p>
         <h2>1. Who operates PayMeBack</h2><p>PayMeBack is operated by [BUSINESS / OWNER NAME], located at [BUSINESS ADDRESS OR REGION]. Contact: [SUPPORT EMAIL]. These terms apply when you use the service.</p>
-        <h2>2. What the service does</h2><p>PayMeBack helps users privately record informal personal loans, repayment plans, payments, and balance adjustments, and optionally share a read-only statement with a borrower. PayMeBack does not transfer funds, collect debt, set lending terms, report credit, act as a bank, or provide financial, tax, or legal advice.</p>
+        <h2>2. What the service does</h2><p>PayMeBack helps users privately record informal personal loans, repayment plans, payments, balance adjustments, follow-up tasks, private notes, and loan documents, and optionally share a statement with a borrower. A borrower may report a payment through some links, but the lender must confirm receipt before the app records it. PayMeBack does not transfer funds, collect debt, set lending terms, report credit, act as a bank, or provide financial, tax, or legal advice.</p>
         <h2>3. Your responsibilities</h2><ul><li>Provide accurate information and keep your account credentials secure.</li><li>Use the service lawfully and obtain any required consent before sharing personal information or contacting another person.</li><li>Review records, calculations, payment history, and statements for accuracy. A displayed record is not proof that a payment occurred or that a debt is legally enforceable.</li><li>Do not use the service for harassment, unlawful lending, threats, or unauthorized access.</li></ul>
         <h2>4. Accounts and email</h2><p>Account access requires email verification through our authentication provider. You may request password reset or account deletion. You are responsible for access to the email account used for sign-in.</p>
-        <h2>5. Shared statements</h2><p>Sharing is optional. Anyone with a valid statement link can view the specific information disclosed by that link until it expires or you revoke it. Treat a link like a private document. Do not share information you do not intend the recipient to see.</p>
+        <h2>5. Shared statements</h2><p>Sharing is optional. Anyone with a valid statement link can view the specific information disclosed by that link until it expires or you revoke it. Some links may permit the borrower to submit a payment report; this does not alter the loan balance unless the lender confirms receipt. Treat a link like a private document. Do not share information you do not intend the recipient to see.</p>
         <h2>6. Data, availability, and changes</h2><p>Service availability depends on third-party hosting and authentication providers. We may update or discontinue features and will provide notice where required. No service can guarantee uninterrupted availability or that a user will preserve independent backups.</p>
         <h2>7. Disclaimers and limits</h2><p>To the extent allowed by applicable law, the service is provided “as is” without a promise that it creates a legal agreement, verifies payments, or is suitable for a particular purpose. Nothing here limits rights that cannot legally be limited. [COUNSEL TO REVIEW LIABILITY, WARRANTY, DISPUTE, AND GOVERNING-LAW TERMS.]</p>
         <h2>8. Contact and effective date</h2><p>Effective date: [DATE]. Questions: [SUPPORT EMAIL]. Applicable regions and dispute terms must be completed after legal review.</p>` :
         `<p class="rounded-xl border border-amber-300 bg-amber-500/[.08] p-3 text-sm text-amber-800 dark:text-amber-200"><strong>Draft for review.</strong> This template describes intended behavior. Replace bracketed placeholders, verify actual provider settings, and obtain qualified legal review before launch.</p>
         <h2>1. Controller and contact</h2><p>[BUSINESS / OWNER NAME] at [BUSINESS ADDRESS OR REGION] is responsible for the personal information described here. Privacy contact: [PRIVACY / SUPPORT EMAIL]. This policy applies in [LAUNCH COUNTRIES / REGIONS] from [EFFECTIVE DATE].</p>
-        <h2>2. Information we process</h2><p>When you use PayMeBack, we process your email address and authentication state; borrower names and optional contact details; loan amounts, purposes, repayment schedules, payment entries, notes, adjustments, payment handles, account preferences, and statement-link metadata. We also receive limited technical data needed for security, delivery, and troubleshooting. Do not enter sensitive information that is not needed to track a loan.</p>
-        <h2>3. Why we use it</h2><ul><li>Authenticate you and protect access to your account.</li><li>Store and display loan records, repayment schedules, payments, and settings.</li><li>Create a statement only when you request a share link, and allow you to revoke or expire it.</li><li>Provide backup/export, account deletion, security, and support.</li></ul>
+        <h2>2. Information we process</h2><p>When you use PayMeBack, we process your email address and authentication state; borrower names and optional contact details; loan amounts, purposes, repayment schedules, payment entries, balance adjustments, private notes, follow-up tasks and history, payment handles, account preferences, and statement-link metadata. If you upload loan documents, the file contents and metadata are stored in the configured Supabase project. A borrower may submit a reported payment and optional note through links that enable this feature. We also receive limited technical data needed for security, delivery, and troubleshooting. Do not enter or upload sensitive information that is not needed to track a loan.</p>
+        <h2>3. Why we use it</h2><ul><li>Authenticate you and protect access to your account.</li><li>Store and display loan records, repayment schedules, payments, tasks, notes, documents, and settings.</li><li>Create a statement only when you request a share link, allow optional borrower payment reports when enabled, and let you revoke or expire the link.</li><li>Provide backup/export, account deletion, security, and support.</li></ul>
         <h2>4. Vendors and sharing</h2><p>Supabase is used for authentication, database hosting, and server-side functions, subject to the project’s actual region, configuration, and vendor terms. The page also loads frontend libraries from Tailwind’s CDN, unpkg (Lucide icons), and jsDelivr (Supabase JavaScript client); those providers may receive technical request information such as your IP address when the page loads. [CONFIRM PROVIDER TERMS, HOSTING, EMAIL, ANALYTICS, AND SUPPORT DETAILS BEFORE LAUNCH.] We do not sell personal information. A statement recipient can view data the owner elects to share through a bearer link. We may disclose information when legally required or to protect service security, subject to applicable law.</p>
-        <h2>5. Storage and security</h2><p>Account records are stored in the configured Supabase project, not solely in this browser. Database row-level security is intended to restrict records to their owner; public statement access is limited to a random revocable token. No internet service can promise absolute security. [DOCUMENT DATA REGION, ENCRYPTION, ACCESS REVIEW, BACKUP, AND INCIDENT PRACTICES AFTER VERIFYING CONFIGURATION.]</p>
+        <h2>5. Storage and security</h2><p>Account records and uploaded loan documents are stored in the configured Supabase project, not solely in this browser. Database row-level security and private file-storage policies are intended to restrict records and files to their owner; public statement access is limited to a random revocable token. Private notes and documents are not included in borrower statements. No internet service can promise absolute security. [DOCUMENT DATA REGION, ENCRYPTION, ACCESS REVIEW, BACKUP, AND INCIDENT PRACTICES AFTER VERIFYING CONFIGURATION.]</p>
         <h2>6. Retention, export, and deletion</h2><p>Records are retained while your account is active and for [RETENTION PERIOD / LEGAL REQUIREMENT] after deletion where applicable. You can export records from the app and request account deletion; deletion removes the account and associated cloud data, subject to backups and lawful retention. Copies you previously downloaded or shared, and old browser-local backups, are not removed automatically.</p>
         <h2>7. Choices and rights</h2><p>Depending on where you live, you may have rights to access, correct, export, restrict, or delete personal information. Contact [PRIVACY EMAIL] to make a request. We will verify requests as required by law. Borrowers who receive a statement should contact its sender about the underlying loan record.</p>
         <h2>8. Children and updates</h2><p>PayMeBack is not designed for children under [MINIMUM AGE]. We may update this policy and will provide notice when required. Contact [PRIVACY / SUPPORT EMAIL] with questions or complaints.</p>`;
@@ -610,8 +819,9 @@
 
     function exportJSON() {
       const data = {
-        format:"paymeback-backup", version:2, exportedAt:new Date().toISOString(),
+        format:"paymeback-backup", version:3, exportedAt:new Date().toISOString(),
         settings, loans:loans.map(loan=>({
+          backupId:loan.id,
           borrowerName:loan.borrower_name, borrowerContact:loan.borrower_contact,
           startDate:loan.start_date, targetDueDate:loan.target_due_date,
           initialAmount:Number(loan.initial_amount_cents)/100, reason:loan.reason,
@@ -619,6 +829,22 @@
           installmentCount:loan.installment_count, firstDueDate:loan.first_due_date, status:loan.status,
           payments:loan.payments.map(p=>({date:p.payment_date,amount:Number(p.amount_cents)/100,note:p.note})),
           adjustments:loan.adjustments.map(a=>({date:a.adjustment_date,amount:Number(a.amount_cents)/100,note:a.note,kind:a.kind}))
+        })),
+        tasks:tasks.map(task=>({
+          title:task.title,details:task.details,dueDate:task.due_date,
+          completedAt:task.completed_at,loanBackupId:task.loan_id
+            ? loans.find(loan=>loan.id===task.loan_id)?.id || null : null
+        })),
+        notes:notes.map(note=>({
+          title:note.title,content:note.content,loanBackupId:note.loan_id
+            ? loans.find(loan=>loan.id===note.loan_id)?.id || null : null
+        })),
+        followUps:followUps.map(item=>({
+          loanBackupId:item.loan_id,sentAt:item.sent_at,note:item.note,method:item.method
+        })),
+        documentManifest:documents.map(file=>({
+          loanBackupId:file.loan_id,fileName:file.file_name,mimeType:file.mime_type,sizeBytes:file.size_bytes,
+          uploadRequired:true
         }))
       };
       download("paymeback-backup.json",JSON.stringify(data,null,2),"application/json");
@@ -648,7 +874,7 @@
       if (!file) return;
       try {
         const text=await file.text();
-        let items, incomingSettings=null;
+        let items, incomingSettings=null, incomingTasks=[], incomingNotes=[], incomingFollowUps=[], incomingDocumentCount=0;
         if(file.name.toLowerCase().endsWith(".csv")){
           const rows=parseCSV(text);if(rows.length<2)throw new Error("The CSV file has no loan records.");
           const headers=rows[0].map(v=>v.trim());
@@ -656,12 +882,19 @@
         }else{
           const data=JSON.parse(text);
           if(Array.isArray(data))items=data;
-          else if(data&&Array.isArray(data.loans)){items=data.loans;incomingSettings=data.settings||null;}
+          else if(data&&Array.isArray(data.loans)){
+            items=data.loans;incomingSettings=data.settings||null;
+            incomingTasks=Array.isArray(data.tasks)?data.tasks:[];
+            incomingNotes=Array.isArray(data.notes)?data.notes:[];
+            incomingFollowUps=Array.isArray(data.followUps)?data.followUps:[];
+            incomingDocumentCount=Array.isArray(data.documentManifest)?data.documentManifest.length:0;
+          }
           else throw new Error("Choose a PayMeBack JSON or CSV backup.");
         }
-        if(!items.length)throw new Error("No loan records were found.");
-        if(!confirm(`Add ${items.length} loan${items.length===1?"":"s"} from this backup to your account? Existing loans will not be replaced.`))return;
+        if(!items.length&&!incomingTasks.length&&!incomingNotes.length&&!incomingFollowUps.length)throw new Error("No loan, task, or note records were found.");
+        if(!confirm(`Add ${items.length} loan${items.length===1?"":"s"}, ${incomingTasks.length} task${incomingTasks.length===1?"":"s"}, and ${incomingNotes.length} note${incomingNotes.length===1?"":"s"} from this backup? Existing records will not be replaced.${incomingDocumentCount?` The backup lists ${incomingDocumentCount} document${incomingDocumentCount===1?"":"s"} but does not contain the private file contents; upload those files again after import.`:""}`))return;
         let imported=0;
+        const loanIdByBackupId=new Map();
         for(const item of items){
           const principal=dollarsToCents(item.initialAmount);
           if(!principal||typeof item.borrowerName!=="string")continue;
@@ -679,6 +912,7 @@
           };
           const {data:created,error}=await supabase.from("loans").insert(payload).select("id").single();
           if(error)throw error;
+          if(item.backupId)loanIdByBackupId.set(String(item.backupId),created.id);
           for(const payment of item.payments||[]){
             const amount=dollarsToCents(payment.amount);if(!amount)continue;
             const result=await supabase.rpc("record_loan_payment",{p_loan_id:created.id,p_payment_date:safeDate(payment.date)||today(),p_amount_cents:amount,p_note:String(payment.note||"").slice(0,300)});
@@ -692,12 +926,47 @@
           if(item.status==="archived"){const result=await supabase.from("loans").update({status:"archived"}).eq("id",created.id);if(result.error)throw result.error;}
           imported++;
         }
+        let tasksImported=0,notesImported=0,followUpsImported=0;
+        for(const task of incomingTasks){
+          const title=String(task.title||"").trim();
+          if(!title)throw new Error("A backup task is missing its title.");
+          const backupLoanId=task.loanBackupId?loanIdByBackupId.get(String(task.loanBackupId)):null;
+          if(task.loanBackupId&&!backupLoanId)continue;
+          const result=await supabase.from("tasks").insert({
+            owner_id:user.id,loan_id:backupLoanId||null,title:title.slice(0,160),
+            details:String(task.details||"").slice(0,2000),due_date:safeDate(task.dueDate)||null,
+            completed_at:task.completedAt&&Number.isFinite(Date.parse(task.completedAt))?new Date(task.completedAt).toISOString():null
+          });
+          if(result.error)throw result.error;
+          tasksImported++;
+        }
+        for(const note of incomingNotes){
+          const content=String(note.content||"").trim();
+          if(!content)throw new Error("A backup note is missing its content.");
+          const backupLoanId=note.loanBackupId?loanIdByBackupId.get(String(note.loanBackupId)):null;
+          if(note.loanBackupId&&!backupLoanId)continue;
+          const result=await supabase.from("notes").insert({
+            owner_id:user.id,loan_id:backupLoanId||null,title:String(note.title||"").slice(0,160),content:content.slice(0,10000)
+          });
+          if(result.error)throw result.error;
+          notesImported++;
+        }
+        for(const item of incomingFollowUps){
+          const loanId=loanIdByBackupId.get(String(item.loanBackupId||""));
+          if(!loanId)continue;
+          const result=await supabase.from("loan_follow_ups").insert({
+            owner_id:user.id,loan_id:loanId,sent_at:Number.isFinite(Date.parse(item.sentAt))?new Date(item.sentAt).toISOString():new Date().toISOString(),
+            method:"manual",note:String(item.note||"").slice(0,500)
+          });
+          if(result.error)throw result.error;
+          followUpsImported++;
+        }
         if(incomingSettings&&confirm("This backup contains payment handles and theme settings. Import those settings too?")){
           const res=await supabase.from("user_settings").upsert({user_id:user.id,venmo:String(incomingSettings.venmo||""),cashapp:String(incomingSettings.cashapp||""),zelle:String(incomingSettings.zelle||""),theme:incomingSettings.theme==="dark"?"dark":"light",updated_at:new Date().toISOString()});
           if(res.error)throw res.error;
         }
         await loadWorkspace();
-        toast(`${imported} loan${imported===1?"":"s"} imported.`);
+        toast(`${imported} loan${imported===1?"":"s"}, ${tasksImported} task${tasksImported===1?"":"s"}, ${notesImported} note${notesImported===1?"":"s"}, and ${followUpsImported} follow-up${followUpsImported===1?"":"s"} imported.`);
       }catch(error){toast(error?.message||"Could not import this backup.",true);}
       finally{$("#import-file").value="";}
     }
@@ -791,7 +1060,7 @@
       closeModal();toast("Settings saved");
     }
     async function promptDeleteAccount() {
-      openModal("Permanently delete account", `<p class="mb-4 text-sm leading-6 text-rose-600">This permanently deletes your account and cloud loan records. This cannot be undone. Your previous browser-local backup is not deleted automatically.</p><form id="delete-account-form" class="space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="delete-password">Confirm your password</label><input required type="password" autocomplete="current-password" class="field" id="delete-password" name="password"></div><label class="flex items-start gap-2 text-xs leading-5 muted"><input required type="checkbox" class="mt-1 accent-rose-600"><span>I understand this permanently deletes the cloud account and records.</span></label><div class="flex justify-end gap-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-danger">Delete account</button></div></form>`);
+      openModal("Permanently delete account", `<p class="mb-4 text-sm leading-6 text-rose-600">This permanently deletes your account, cloud records, tasks, notes, and uploaded loan documents. This cannot be undone. Your previous browser-local backup is not deleted automatically.</p><form id="delete-account-form" class="space-y-4"><div><label class="mb-1.5 block text-xs font-semibold" for="delete-password">Confirm your password</label><input required type="password" autocomplete="current-password" class="field" id="delete-password" name="password"></div><label class="flex items-start gap-2 text-xs leading-5 muted"><input required type="checkbox" class="mt-1 accent-rose-600"><span>I understand this permanently deletes the cloud account and records.</span></label><div class="flex justify-end gap-2"><button type="button" class="btn btn-soft" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-danger">Delete account</button></div></form>`);
     }
     async function deleteAccount(form) {
       const password=new FormData(form).get("password");
@@ -812,6 +1081,44 @@
       if(action==="backdrop"&&event.target===target){closeModal();return;}
       if(action==="close-modal"){closeModal();return;}
       if(action==="home"){event.preventDefault();stripHash();if(user)renderDashboard();else renderAuth();return;}
+      if(action==="view"){currentView=target.dataset.view||"dashboard";if(currentView==="notes")noteLoanFilter="";renderDashboard();return;}
+      if(action==="new-task"){taskForm(null,target.dataset.loanId||"");return;}
+      if(action==="edit-task"){const task=tasks.find(item=>item.id===id);if(task)taskForm(task);return;}
+      if(action==="toggle-task"){
+        const task=tasks.find(item=>item.id===id);if(!task)return;
+        const returnView=currentView;
+        const {error}=await supabase.from("tasks").update({completed_at:task.completed_at?null:new Date().toISOString(),updated_at:new Date().toISOString()}).eq("id",task.id);
+        if(error)toast(error.message,true);else{await loadWorkspace();currentView=returnView;renderDashboard();}
+        return;
+      }
+      if(action==="delete-task"){
+        if(!confirm("Delete this task?"))return;
+        const returnView=currentView;
+        const {error}=await supabase.from("tasks").delete().eq("id",id);
+        if(error)toast(error.message,true);else{await loadWorkspace();currentView=returnView;renderDashboard();toast("Task deleted");}
+        return;
+      }
+      if(action==="new-note"){noteForm(null,target.dataset.loanId||"");return;}
+      if(action==="loan-notes"){const loan=loans.find(item=>item.id===id);if(loan)loanNotesView(loan);return;}
+      if(action==="edit-note"){const note=notes.find(item=>item.id===id);if(note)noteForm(note);return;}
+      if(action==="delete-note"){
+        if(!confirm("Delete this private note?"))return;
+        const {error}=await supabase.from("notes").delete().eq("id",id);
+        if(error)toast(error.message,true);else{await loadWorkspace();currentView="notes";renderNotesView();toast("Note deleted");}
+        return;
+      }
+      if(action==="documents"){const loan=loans.find(item=>item.id===id);if(loan)documentsModal(loan);return;}
+      if(action==="open-document"){openLoanDocument(id).catch(error=>toast(error.message||"Could not open document.",true));return;}
+      if(action==="delete-document"){deleteLoanDocument(id).catch(error=>toast(error.message||"Could not delete document.",true));return;}
+      if(action==="calendar-prev"){calendarMonth=new Date(calendarMonth.getFullYear(),calendarMonth.getMonth()-1,1);renderCalendarView();return;}
+      if(action==="calendar-next"){calendarMonth=new Date(calendarMonth.getFullYear(),calendarMonth.getMonth()+1,1);renderCalendarView();return;}
+      if(action==="review-submission"){
+        const approve=target.dataset.approve==="true";
+        if(approve&&!confirm("Confirm that you received this payment? The loan balance will be updated."))return;
+        const {error}=await supabase.rpc("review_shared_payment",{p_submission_id:id,p_approve:approve});
+        if(error)toast(error.message,true);else{await loadWorkspace();currentView="dashboard";renderDashboard();toast(approve?"Payment confirmed and recorded":"Payment report declined");}
+        return;
+      }
       if(action==="auth-mode"){authMode=target.dataset.mode;renderAuth();return;}
       if(action==="resend-verification"){
         const {error}=await supabase.auth.resend({type:"signup",email:pendingVerificationEmail,options:{emailRedirectTo:`${location.origin}${location.pathname}`}});
@@ -820,13 +1127,20 @@
       if(action==="theme"){
         dark=!dark;settings.theme=dark?"dark":"light";setTheme();
         if(user){const {error}=await supabase.from("user_settings").upsert({user_id:user.id,...settings,updated_at:new Date().toISOString()});if(error)toast(error.message,true);}
-        if(currentView==="dashboard")renderDashboard();else if($("#modal-root").innerHTML)settingsForm();
+        if(["dashboard","tasks","notes","calendar"].includes(currentView))renderDashboard();else if($("#modal-root").innerHTML)settingsForm();
         return;
       }
       if(action==="settings"){settingsForm();return;}
       if(action==="new-loan"){loanForm();return;}
       if(action==="payment"){const loan=loans.find(l=>l.id===id);if(loan)paymentForm(loan);return;}
       if(action==="reminder"){const loan=loans.find(l=>l.id===id);if(loan)reminderForm(loan);return;}
+      if(action==="reminder-task"){const loan=loans.find(item=>item.id===id);if(loan)taskForm({title:`Follow up with ${loan.borrower_name}`,details:"Send the payment reminder and note the response.",due_date:today(),loan_id:loan.id});return;}
+      if(action==="mark-reminder-sent"){
+        const loan=loans.find(item=>item.id===id);if(!loan)return;
+        const {error}=await supabase.from("loan_follow_ups").insert({owner_id:user.id,loan_id:loan.id,note:"Manual reminder sent"});
+        if(error)toast(error.message,true);else{await loadWorkspace();const updated=loans.find(item=>item.id===id);if(updated)reminderForm(updated);toast("Follow-up recorded");}
+        return;
+      }
       if(action==="loan-menu"){openLoanActions(id);return;}
       if(action==="history"){const loan=loans.find(l=>l.id===id);if(loan)historyModal(loan);return;}
       if(action==="edit"){const loan=loans.find(l=>l.id===id);if(loan)loanForm(loan);return;}
@@ -839,14 +1153,19 @@
         return;
       }
       if(action==="delete-loan"){
-        const loan=loans.find(l=>l.id===id);if(!loan||!confirm(`Permanently delete ${loan.borrower_name}'s loan and history?`))return;
+        const loan=loans.find(l=>l.id===id);if(!loan||!confirm(`Permanently delete ${loan.borrower_name}'s loan, payments, linked tasks and notes, follow-up history, statements, and attached files? This cannot be undone.`))return;
+        const loanDocuments=documents.filter(item=>item.loan_id===loan.id);
+        for(let index=0;index<loanDocuments.length;index+=100){
+          const {error:storageError}=await supabase.storage.from("paymeback-loan-documents").remove(loanDocuments.slice(index,index+100).map(item=>item.storage_path));
+          if(storageError){toast(`Could not delete attached files: ${storageError.message}`,true);return;}
+        }
         const {error}=await supabase.from("loans").delete().eq("id",id);
         if(error)toast(error.message,true);else{closeModal();await loadWorkspace();toast("Loan and history deleted");}
         return;
       }
       if(action==="share"){const loan=loans.find(l=>l.id===id);if(loan)await shareForm(loan);return;}
       if(action==="create-share"){
-        try{const url=await createShareLink(id,$("#share-expiry").value);closeModal();openModal("Statement link created",`<p class="mb-3 text-sm leading-6 muted">Copy and share this private link. Anyone who receives it can view this statement until it expires or you revoke it.</p><textarea readonly class="field min-h-24 break-all text-xs" id="share-url">${escapeHTML(url)}</textarea><div class="mt-3 flex justify-end"><button class="btn btn-primary" data-action="copy-share"><i data-lucide="copy" class="h-4 w-4"></i>Copy link</button></div>`);if(navigator.clipboard?.writeText){try{await navigator.clipboard.writeText(url);toast("Link copied");}catch(_){}}}catch(error){toast(error.message||"Could not create a link.",true);}
+        try{const allowPayments=$("#share-allow-payments").checked;const url=await createShareLink(id,$("#share-expiry").value,allowPayments);closeModal();openModal("Statement link created",`<p class="mb-3 text-sm leading-6 muted">Copy and share this private link. Anyone who receives it can view this statement until it expires or you revoke it.${allowPayments?" Borrower payment reports require your approval.":""}</p><textarea readonly class="field min-h-24 break-all text-xs" id="share-url">${escapeHTML(url)}</textarea><div class="mt-3 flex justify-end"><button class="btn btn-primary" data-action="copy-share"><i data-lucide="copy" class="h-4 w-4"></i>Copy link</button></div>`);if(navigator.clipboard?.writeText){try{await navigator.clipboard.writeText(url);toast("Link copied");}catch(_){}}}catch(error){toast(error.message||"Could not create a link.",true);}
         return;
       }
       if(action==="copy-share"){const field=$("#share-url");if(field){field.select();try{await navigator.clipboard.writeText(field.value);toast("Link copied");}catch(_){document.execCommand("copy");toast("Link copied");}}return;}
@@ -873,6 +1192,7 @@
     });
     document.addEventListener("input",event=>{
       if(event.target.id==="search"){search=event.target.value;const pos=event.target.selectionStart;renderDashboard();const field=$("#search");field?.focus();field?.setSelectionRange(pos,pos);window.lucide?.createIcons();}
+      if(event.target.id==="notes-search"){renderNotesView();const field=$("#notes-search");field?.focus();field?.setSelectionRange(field.value.length,field.value.length);}
     });
     document.addEventListener("change",event=>{
       if(event.target.id==="sort"){sortBy=event.target.value;renderDashboard();window.lucide?.createIcons();}
@@ -883,6 +1203,21 @@
       event.preventDefault();
       const id=form.getAttribute("id");
       try{
+        if(id==="borrower-payment-form"){
+          const fd=new FormData(form);
+          const amount=dollarsToCents(fd.get("amount"));
+          const date=safeDate(fd.get("date"));
+          if(!amount||!date)throw new Error("Enter a valid payment amount and date.");
+          const {error}=await supabase.rpc("submit_shared_payment",{
+            p_token:String(fd.get("token")||""),
+            p_amount_cents:amount,
+            p_payment_date:date,
+            p_note:String(fd.get("note")||"").trim().slice(0,300)
+          });
+          if(error)throw error;
+          form.outerHTML='<div class="border-t border-[var(--line)] px-6 py-6 sm:px-9"><p class="rounded-xl bg-emerald-500/10 p-4 text-sm leading-6 text-emerald-700">Payment report sent. The lender will update the balance after confirming receipt.</p></div>';
+          return;
+        }
         if(id==="config-form"){
           const fd=new FormData(form);const url=String(fd.get("supabaseUrl")||"").trim().replace(/\/$/,"");
           const key=String(fd.get("supabaseAnonKey")||"").trim();
@@ -913,6 +1248,9 @@
           if(error)throw error;passwordRecovery=false;authMode="signin";await supabase.auth.signOut();renderAuth("Password updated. Sign in with your new password.");return;
         }
         if(id==="loan-form"){await saveLoan(form);return;}
+        if(id==="task-form"){await saveTask(form);return;}
+        if(id==="note-form"){await saveNote(form);return;}
+        if(id==="document-form"){await uploadLoanDocument(form);return;}
         if(id==="payment-form"){await savePayment(form);return;}
         if(id==="forgive-form"){await saveForgiveness(form);return;}
         if(id==="settings-form"){await saveSettings(form);return;}
