@@ -3,12 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f6f7fb">
+  <meta name="theme-color" content="#f4f7f2">
   <meta name="description" content="A private, clear way to track personal loans and repayment plans.">
   <title>PayMeBack - Personal Loan &amp; IOU Tracker</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
-    tailwind.config = { darkMode: "class", theme: { extend: { colors: { brand: "#625bf6" } } } };
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            brand: "#34796f",
+            indigo: {
+              50: "#eff8f5", 100: "#dcefe9", 200: "#b9ded3", 300: "#8bc5b4",
+              400: "#5aa48f", 500: "#34796f", 600: "#28665d", 700: "#22534d",
+              800: "#20443f", 900: "#1d3935", 950: "#102522"
+            }
+          }
+        }
+      }
+    };
     window.PAYMEBACK_CONFIG = {
       supabaseUrl: "https://wguyfniwmthdxghsgnxa.supabase.co",
       supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndndXlmbml3bXRoZHhnaHNnbnhhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4NzE1NTMsImV4cCI6MjEwODQ0NzU1M30.7UV-IT_zyL-xVWqpyiS7gihlGvLnXr3irrrFM32snPU"
@@ -17,30 +31,30 @@
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <style>
-    :root { color-scheme:light; --page:#f6f7fb; --surface:#fff; --line:#e9eaf1; --text:#172033; --muted:#788197; }
-    html.dark { color-scheme:dark; --page:#0e1220; --surface:#171c2b; --line:#2a3042; --text:#edf0fa; --muted:#9aa4ba; }
-    body { background:var(--page); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    :root { color-scheme:light; --page:#f4f7f2; --surface:#fffefa; --line:#e1e9e1; --text:#24342e; --muted:#728078; --accent:#34796f; --accent-hover:#28665d; }
+    html.dark { color-scheme:dark; --page:#101915; --surface:#19231e; --line:#2a3a31; --text:#e9f2eb; --muted:#a1b0a5; --accent:#69b3a2; --accent-hover:#82c6b5; }
+    body { background:radial-gradient(ellipse at 8% 0%,color-mix(in srgb,var(--accent) 7%,transparent),transparent 34rem),var(--page); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
     .surface { background:var(--surface); border:1px solid var(--line); }
     .muted { color:var(--muted); }
     .field { width:100%; border:1px solid var(--line); border-radius:.75rem; background:var(--surface); color:var(--text); padding:.7rem .85rem; outline:none; }
-    .field:focus { border-color:#817cf9; box-shadow:0 0 0 3px #625bf61c; }
+    .field:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent); }
     .field::placeholder { color:var(--muted); }
     .field:disabled { opacity:.6; cursor:not-allowed; }
     .btn { display:inline-flex; align-items:center; justify-content:center; gap:.5rem; border-radius:.75rem; padding:.67rem .95rem; font-weight:650; transition:all .15s; white-space:nowrap; }
-    .btn-primary { color:#fff; background:#625bf6; box-shadow:0 4px 12px #625bf62b; }
-    .btn-primary:hover { background:#5049e8; transform:translateY(-1px); }
+    .btn-primary { color:#fff; background:var(--accent); box-shadow:0 4px 12px color-mix(in srgb,var(--accent) 22%,transparent); }
+    .btn-primary:hover { background:var(--accent-hover); transform:translateY(-1px); }
     .btn-soft { color:var(--text); background:var(--surface); border:1px solid var(--line); }
-    .btn-soft:hover { border-color:#c8c6ff; color:#625bf6; }
+    .btn-soft:hover { border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); color:var(--accent-hover); }
     .btn-danger { color:#dc2626; background:color-mix(in srgb,var(--surface) 90%,#fee2e2); border:1px solid #fecaca; }
     .icon-btn { display:inline-flex; align-items:center; justify-content:center; width:2.35rem; height:2.35rem; border-radius:.7rem; color:var(--muted); }
-    .icon-btn:hover { background:color-mix(in srgb,var(--page) 82%,#625bf6 18%); color:var(--text); }
+    .icon-btn:hover { background:color-mix(in srgb,var(--page) 82%,var(--accent) 18%); color:var(--text); }
     .card { border-radius:1rem; box-shadow:0 2px 10px #19234a08; }
     .metric-icon { width:2.6rem; height:2.6rem; display:grid; place-items:center; border-radius:.8rem; }
     .modal-backdrop { position:fixed; inset:0; z-index:50; display:grid; place-items:center; padding:1rem; background:#0b1020a6; backdrop-filter:blur(5px); }
     .modal-panel { width:min(100%,38rem); max-height:min(92vh,56rem); overflow:auto; }
     .overdue { border-color:#fecaca!important; background:linear-gradient(110deg,color-mix(in srgb,var(--surface) 95%,#fee2e2),var(--surface)); }
-    .nav-active { color:#625bf6; background:#625bf610; }
-    .empty-dash { background-image:linear-gradient(135deg,#625bf60c 25%,transparent 25%,transparent 50%,#625bf60c 50%,#625bf60c 75%,transparent 75%); background-size:12px 12px; }
+    .nav-active { color:var(--accent-hover); background:color-mix(in srgb,var(--accent) 9%,transparent); }
+    .empty-dash { background-image:linear-gradient(135deg,color-mix(in srgb,var(--accent) 5%,transparent) 25%,transparent 25%,transparent 50%,color-mix(in srgb,var(--accent) 5%,transparent) 50%,color-mix(in srgb,var(--accent) 5%,transparent) 75%,transparent 75%); background-size:12px 12px; }
     .legal-copy h2 { margin:1.5rem 0 .5rem; font-weight:750; font-size:1.05rem; }
     .legal-copy p,.legal-copy li { color:var(--muted); font-size:.9rem; line-height:1.7; }
     .legal-copy ul { list-style:disc; padding-left:1.25rem; margin:.5rem 0; }
@@ -122,7 +136,7 @@
     }
     function setTheme() {
       document.documentElement.classList.toggle("dark", dark);
-      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#0e1220" : "#f6f7fb");
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#101915" : "#f4f7f2");
     }
     function closeModal() { $("#modal-root").innerHTML = ""; }
     function openModal(title, content) {
